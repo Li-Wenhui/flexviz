@@ -46,15 +46,19 @@ To fix this, open Terminal and run:
 
 Then restart KiCad."""
     else:  # Linux
-        return f"""PyOpenGL is required but not installed in KiCad's Python environment.
+        return """PyOpenGL is required but not installed.
 
-To fix this, open a terminal and run:
+UBUNTU/DEBIAN (Recommended):
+    sudo apt install python3-opengl
 
-    "{sys.executable}" -m pip install PyOpenGL
+FEDORA:
+    sudo dnf install python3-pyopengl
 
-Or install system-wide:
+ARCH:
+    sudo pacman -S python-opengl
 
-    pip install PyOpenGL
+ALTERNATIVE (if system package doesn't work):
+    pip install --break-system-packages --user PyOpenGL
 
 Then restart KiCad."""
 
