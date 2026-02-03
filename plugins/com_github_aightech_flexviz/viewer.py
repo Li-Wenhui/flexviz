@@ -1242,20 +1242,30 @@ class FlexViewerFrame(wx.Frame):
 
             options_str = " ".join(cmd_options)
 
-            commands = f"""STEP export must run from command line (KiCad library conflicts).
+            commands = f"""STEP export requires the build123d library, which conflicts with KiCad's Python.
 
-Copy and paste these commands into a terminal:
+OPTION 1: Use OBJ export instead (no dependencies)
+  - Click "Export OBJ" - works without any installation
+  - OBJ files can be imported into Onshape, Fusion 360, FreeCAD, etc.
 
-source "{venv_activate}"
-python "{cli_script}" "{pcb_path}" "{output_path}" {options_str}
+OPTION 2: Run STEP export from command line
+  1. Create a Python virtual environment:
+     python -m venv flexviz_venv
+     source flexviz_venv/bin/activate  # Linux/Mac
+     flexviz_venv\\Scripts\\activate   # Windows
 
-Additional options:
-  --3d-models              Include 3D models from footprints
-  --components             Include component boxes
-  --pads                   Include pads
+  2. Install build123d:
+     pip install build123d
+
+  3. Run the export script:
+     python "{cli_script}" "{pcb_path}" "{output_path}" {options_str}
+
+Additional CLI options:
+  --direct                 True CAD geometry (not mesh)
+  --3d-models              Include 3D models
   --flat                   Export unbent board"""
 
-            wx.MessageBox(commands, "STEP Export Commands", wx.OK | wx.ICON_INFORMATION)
+            wx.MessageBox(commands, "STEP Export - Setup Required", wx.OK | wx.ICON_INFORMATION)
             return
 
         if self.canvas.mesh is None:
