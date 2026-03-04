@@ -652,6 +652,8 @@ def board_to_step_native(board_geometry, markers, filename, config=None,
 
         # Get outline as list of (x,y) tuples
         outline_2d = list(board_geometry.outline.vertices)
+        if len(outline_2d) < 3:
+            return False
         holes_2d = [list(c.vertices) for c in board_geometry.cutouts]
 
         # Split board into regions (1 subdivision for STEP — smooth cylinders)

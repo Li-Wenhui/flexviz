@@ -98,18 +98,27 @@ class StepWriter:
         key = _round_pt(coords)
         if key in self._point_cache:
             return self._point_cache[key]
-        vals = ",".join(f"{v:.10g}" for v in coords)
+        vals = ",".join(f"{v:.10g}" for v in key)
         eid = self._add(f"CARTESIAN_POINT('',(  {vals}))")
         self._point_cache[key] = eid
         return eid
 
     def direction(self, vec):
-        """DIRECTION with dedup on normalized+rounded vector."""
+        """DIRECTION with dedup on normalized+rounded vector.
+
+        Components smaller than 1e-5 are snapped to zero to prevent
+        floating-point noise from creating distinct direction entities
+        for what is logically the same vector.
+        """
         n = _normalize(vec)
-        key = _round_pt(n)
+        # Snap near-zero components to exactly 0 for clean dedup
+        cleaned = tuple(0.0 if abs(c) < 1e-5 else c for c in n)
+        # Re-normalize after snapping (in case snapping changed length)
+        cleaned = _normalize(cleaned)
+        key = _round_pt(cleaned)
         if key in self._direction_cache:
             return self._direction_cache[key]
-        vals = ",".join(f"{v:.10g}" for v in n)
+        vals = ",".join(f"{v:.10g}" for v in key)
         eid = self._add(f"DIRECTION('',(  {vals}))")
         self._direction_cache[key] = eid
         return eid
