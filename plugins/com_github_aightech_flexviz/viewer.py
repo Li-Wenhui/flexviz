@@ -90,37 +90,10 @@ except ImportError:
     from stiffener import extract_stiffeners
     from validation import validate_design, get_fold_radius_status, ValidationResult
 
-# Lazy import for step_export to avoid crashes from build123d/vtk conflicts with KiCad
-_step_export_module = None
-
-def _get_step_export():
-    """Lazy load step_export module to avoid import-time crashes."""
-    global _step_export_module
-    if _step_export_module is None:
-        try:
-            try:
-                from . import step_export as mod
-            except ImportError:
-                import step_export as mod
-            _step_export_module = mod
-        except Exception as e:
-            print(f"Failed to load step_export: {e}")
-            _step_export_module = False
-    return _step_export_module
-
-def is_step_export_available():
-    """Check if STEP export is available."""
-    mod = _get_step_export()
-    if mod and mod is not False:
-        return mod.is_step_export_available()
-    return False
-
-def mesh_to_step(mesh, filename):
-    """Export mesh to STEP file."""
-    mod = _get_step_export()
-    if mod and mod is not False:
-        return mod.mesh_to_step(mesh, filename)
-    return False
+try:
+    from .step_export import board_to_step_native
+except ImportError:
+    from step_export import board_to_step_native
 
 
 class GLCanvas(glcanvas.GLCanvas):
@@ -795,7 +768,7 @@ class FlexViewerFrame(wx.Frame):
         export_sizer2 = wx.BoxSizer(wx.HORIZONTAL)
 
         btn_export_step = wx.Button(control_panel, label="Export STEP")
-        btn_export_step.SetToolTip("Export to STEP format for CAD tools (requires command-line)")
+        btn_export_step.SetToolTip("Export to STEP format for CAD tools")
         btn_export_step.Bind(wx.EVT_BUTTON, self.on_export_step)
         export_sizer2.Add(btn_export_step, 1, wx.ALL, 3)
 
@@ -1214,66 +1187,8 @@ class FlexViewerFrame(wx.Frame):
 
     def on_export_step(self, event):
         """Export to STEP file."""
-        if not is_step_export_available():
-            # Get paths for the command
-            plugin_dir = os.path.dirname(os.path.abspath(__file__))
-            venv_activate = os.path.join(plugin_dir, "venv", "bin", "activate")
-            cli_script = os.path.join(plugin_dir, "step_export_cli.py")
-
-            # Get PCB path if available
-            pcb_path = getattr(self, 'pcb_filepath', None) or "your_board.kicad_pcb"
-
-            # Suggest output path next to the PCB
-            if pcb_path and pcb_path != "your_board.kicad_pcb":
-                output_path = os.path.splitext(pcb_path)[0] + ".step"
-            else:
-                output_path = "output.step"
-
-            # Get current settings from viewer
-            subdivisions = self.config.bend_subdivisions if hasattr(self, 'config') else 4
-            stiffener_thickness = self.config.stiffener_thickness if hasattr(self, 'config') else 0.2
-            marker_layer = self.config.marker_layer if hasattr(self, 'config') else "User.1"
-            has_stiffener = self.config.has_stiffener if hasattr(self, 'config') else False
-
-            # Build command with current settings
-            cmd_options = []
-            cmd_options.append(f'--subdivisions {subdivisions}')
-            cmd_options.append(f'--marker-layer "{marker_layer}"')
-            if has_stiffener:
-                cmd_options.append(f'--stiffener-thickness {stiffener_thickness}')
-            else:
-                cmd_options.append('--no-stiffeners')
-
-            options_str = " ".join(cmd_options)
-
-            commands = f"""STEP export requires the build123d library, which conflicts with KiCad's Python.
-
-OPTION 1: Use OBJ export instead (no dependencies)
-  - Click "Export OBJ" - works without any installation
-  - OBJ files can be imported into Onshape, Fusion 360, FreeCAD, etc.
-
-OPTION 2: Run STEP export from command line
-  1. Create a Python virtual environment:
-     python -m venv flexviz_venv
-     source flexviz_venv/bin/activate  # Linux/Mac
-     flexviz_venv\\Scripts\\activate   # Windows
-
-  2. Install build123d:
-     pip install build123d
-
-  3. Run the export script:
-     python "{cli_script}" "{pcb_path}" "{output_path}" {options_str}
-
-Additional CLI options:
-  --direct                 True CAD geometry (not mesh)
-  --3d-models              Include 3D models
-  --flat                   Export unbent board"""
-
-            wx.MessageBox(commands, "STEP Export - Setup Required", wx.OK | wx.ICON_INFORMATION)
-            return
-
-        if self.canvas.mesh is None:
-            wx.MessageBox("No mesh to export.", "Export Error", wx.OK | wx.ICON_WARNING)
+        if self.board_geometry is None:
+            wx.MessageBox("No board geometry to export.", "Export Error", wx.OK | wx.ICON_WARNING)
             return
 
         with wx.FileDialog(
@@ -1284,10 +1199,20 @@ Additional CLI options:
         ) as dialog:
             if dialog.ShowModal() == wx.ID_OK:
                 path = dialog.GetPath()
-                # Show busy cursor during export
                 wx.BeginBusyCursor()
                 try:
-                    success = mesh_to_step(self.canvas.mesh, path)
+                    stiffeners = None
+                    if hasattr(self, 'pcb') and self.pcb and hasattr(self, 'config') and self.config.has_stiffener:
+                        stiffeners = extract_stiffeners(self.pcb, self.config)
+
+                    success = board_to_step_native(
+                        self.board_geometry,
+                        self.fold_markers or [],
+                        path,
+                        config=getattr(self, 'config', None),
+                        pcb=getattr(self, 'pcb', None),
+                        stiffeners=stiffeners,
+                    )
                     if success:
                         wx.MessageBox(f"Exported to:\n{path}", "Export Complete", wx.OK | wx.ICON_INFORMATION)
                     else:

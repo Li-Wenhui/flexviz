@@ -1,0 +1,145 @@
+(kicad_pcb
+  (version 20240108)
+  (generator "pcbnew")
+  (general
+    (thickness 0.2)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+    (46 "User.1" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+
+  ;; ============================================================
+  ;; H-shape outline with 2mm arc corners
+  ;; Left bar:  x=[0,10]  y=[0,40]
+  ;; Right bar: x=[30,40] y=[0,40]
+  ;; Cross-bar: x=[10,30] y=[16,24]
+  ;; Corner radius r=2
+  ;;
+  ;; Outline traced CW (KiCad convention, Y-down):
+  ;; Start at top-left outer corner, go right along top of left bar
+  ;; ============================================================
+
+  ;; --- Top of left bar ---
+  ;; Arc: top-left outer corner (0,0), center (2,2)
+  (gr_arc (start 0 2) (mid 0.58579 0.58579) (end 2 0) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))
+  ;; Line: top edge of left bar
+  (gr_line (start 2 0) (end 8 0) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))
+  ;; Arc: top-right outer corner of left bar (10,0), center (8,2)
+  (gr_arc (start 8 0) (mid 9.41421 0.58579) (end 10 2) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))
+
+  ;; --- Right side of left bar, above cross-bar ---
+  (gr_line (start 10 2) (end 10 16) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))
+
+  ;; --- Upper-left notch (concave corner into cross-bar top) ---
+  ;; No arc here — sharp inner corner
+  ;; Cross-bar top edge, left half
+  (gr_line (start 10 16) (end 30 16) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))
+
+  ;; --- Upper-right notch (concave corner) ---
+  ;; Right bar, above cross-bar
+  (gr_line (start 30 16) (end 30 2) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))
+
+  ;; --- Top of right bar ---
+  ;; Arc: top-left outer corner of right bar (30,0), center (32,2)
+  (gr_arc (start 30 2) (mid 30.58579 0.58579) (end 32 0) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))
+  ;; Line: top edge of right bar
+  (gr_line (start 32 0) (end 38 0) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))
+  ;; Arc: top-right outer corner (40,0), center (38,2)
+  (gr_arc (start 38 0) (mid 39.41421 0.58579) (end 40 2) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))
+
+  ;; --- Right side of right bar ---
+  (gr_line (start 40 2) (end 40 38) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))
+
+  ;; --- Bottom of right bar ---
+  ;; Arc: bottom-right outer corner (40,40), center (38,38)
+  (gr_arc (start 40 38) (mid 39.41421 39.41421) (end 38 40) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))
+  ;; Line: bottom edge of right bar
+  (gr_line (start 38 40) (end 32 40) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))
+  ;; Arc: bottom-left outer corner of right bar (30,40), center (32,38)
+  (gr_arc (start 32 40) (mid 30.58579 39.41421) (end 30 38) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))
+
+  ;; --- Right bar, below cross-bar ---
+  (gr_line (start 30 38) (end 30 24) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))
+
+  ;; --- Lower notch (concave corners) ---
+  ;; Cross-bar bottom edge
+  (gr_line (start 30 24) (end 10 24) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))
+
+  ;; --- Left bar, below cross-bar ---
+  (gr_line (start 10 24) (end 10 38) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))
+
+  ;; --- Bottom of left bar ---
+  ;; Arc: bottom-right outer corner of left bar (10,40), center (8,38)
+  (gr_arc (start 10 38) (mid 9.41421 39.41421) (end 8 40) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))
+  ;; Line: bottom edge of left bar
+  (gr_line (start 8 40) (end 2 40) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))
+  ;; Arc: bottom-left outer corner (0,40), center (2,38)
+  (gr_arc (start 2 40) (mid 0.58579 39.41421) (end 0 38) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))
+
+  ;; --- Left side of left bar ---
+  (gr_line (start 0 38) (end 0 2) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))
+
+
+  ;; ============================================================
+  ;; FOLD MARKERS (5 folds, one per segment of H)
+  ;; Format: 2 dashed parallel lines + dimension with angle text
+  ;; Bend zone width = 2mm
+  ;; ============================================================
+
+  ;; --- Fold 1: Left bar, upper portion (horizontal fold at y=8) ---
+  (gr_line (start 0 7) (end 10 7) (stroke (width 0.15) (type dash)) (layer "User.1"))
+  (gr_line (start 0 9) (end 10 9) (stroke (width 0.15) (type dash)) (layer "User.1"))
+  (dimension (type aligned) (layer "User.1")
+    (pts (xy 5 7) (xy 5 9)) (height 3)
+    (gr_text "90°" (at 5 4 0) (layer "User.1") (effects (font (size 1.5 1.5) (thickness 0.15))))
+    (format (prefix "") (suffix ""))
+    (style (thickness 0.1) (arrow_length 1.27) (text_position_mode 0))
+  )
+
+  ;; --- Fold 2: Left bar, lower portion (horizontal fold at y=32) ---
+  (gr_line (start 0 31) (end 10 31) (stroke (width 0.15) (type dash)) (layer "User.1"))
+  (gr_line (start 0 33) (end 10 33) (stroke (width 0.15) (type dash)) (layer "User.1"))
+  (dimension (type aligned) (layer "User.1")
+    (pts (xy 5 31) (xy 5 33)) (height 3)
+    (gr_text "-90°" (at 5 28 0) (layer "User.1") (effects (font (size 1.5 1.5) (thickness 0.15))))
+    (format (prefix "") (suffix ""))
+    (style (thickness 0.1) (arrow_length 1.27) (text_position_mode 0))
+  )
+
+  ;; --- Fold 3: Cross-bar, middle (vertical fold at x=20) ---
+  (gr_line (start 19 16) (end 19 24) (stroke (width 0.15) (type dash)) (layer "User.1"))
+  (gr_line (start 21 16) (end 21 24) (stroke (width 0.15) (type dash)) (layer "User.1"))
+  (dimension (type aligned) (layer "User.1")
+    (pts (xy 19 20) (xy 21 20)) (height 3)
+    (gr_text "90°" (at 20 17 0) (layer "User.1") (effects (font (size 1.5 1.5) (thickness 0.15))))
+    (format (prefix "") (suffix ""))
+    (style (thickness 0.1) (arrow_length 1.27) (text_position_mode 0))
+  )
+
+  ;; --- Fold 4: Right bar, upper portion (horizontal fold at y=8) ---
+  (gr_line (start 30 7) (end 40 7) (stroke (width 0.15) (type dash)) (layer "User.1"))
+  (gr_line (start 30 9) (end 40 9) (stroke (width 0.15) (type dash)) (layer "User.1"))
+  (dimension (type aligned) (layer "User.1")
+    (pts (xy 35 7) (xy 35 9)) (height 3)
+    (gr_text "45°" (at 35 4 0) (layer "User.1") (effects (font (size 1.5 1.5) (thickness 0.15))))
+    (format (prefix "") (suffix ""))
+    (style (thickness 0.1) (arrow_length 1.27) (text_position_mode 0))
+  )
+
+  ;; --- Fold 5: Right bar, lower portion (horizontal fold at y=32) ---
+  (gr_line (start 30 31) (end 40 31) (stroke (width 0.15) (type dash)) (layer "User.1"))
+  (gr_line (start 30 33) (end 40 33) (stroke (width 0.15) (type dash)) (layer "User.1"))
+  (dimension (type aligned) (layer "User.1")
+    (pts (xy 35 31) (xy 35 33)) (height 3)
+    (gr_text "-45°" (at 35 28 0) (layer "User.1") (effects (font (size 1.5 1.5) (thickness 0.15))))
+    (format (prefix "") (suffix ""))
+    (style (thickness 0.1) (arrow_length 1.27) (text_position_mode 0))
+  )
+)
