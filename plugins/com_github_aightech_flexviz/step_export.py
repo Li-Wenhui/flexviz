@@ -425,17 +425,10 @@ def _build_bend_region_solid(writer, region, recipe_with_defs, thickness):
     along_min = min(along_dists)
     along_max = max(along_dists)
 
-    # For back entry, mirror perpendicular distances
-    if entered_from_back:
-        perp_min_eff = -perp_max
-        perp_max_eff = -perp_min
-    else:
-        perp_min_eff = perp_min
-        perp_max_eff = perp_max
-
-    # Arc fractions
-    dist_into_zone_min = max(0, perp_min_eff + hw)
-    dist_into_zone_max = min(fold_def.zone_width, perp_max_eff + hw)
+    # Arc fractions — the physical cylinder is the same regardless of entry
+    # direction, so we always use the raw perpendicular distances.
+    dist_into_zone_min = max(0, perp_min + hw)
+    dist_into_zone_max = min(fold_def.zone_width, perp_max + hw)
     frac_min = dist_into_zone_min / fold_def.zone_width if fold_def.zone_width > 0 else 0
     frac_max = dist_into_zone_max / fold_def.zone_width if fold_def.zone_width > 0 else 0
     # Always use positive theta: the cyl_axis negation already handles
@@ -445,57 +438,66 @@ def _build_bend_region_solid(writer, region, recipe_with_defs, thickness):
     theta_min = frac_min * abs(fold_def.angle)
     theta_max = frac_max * abs(fold_def.angle)
 
-    # Compute cylinder axis in 3D using the prior recipe
+    # Track cumulative rotation through prior recipe (for 3D directions).
+    # We do NOT track the origin here — instead we derive fold_center_3d
+    # from transform_point on a reference point that avoids edge cases.
     rot = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
-    origin = (0.0, 0.0, 0.0)
     for entry in prior_recipe:
         f = entry[0]
         c = entry[1]
         back = entry[2] if len(entry) > 2 else False
         if c == "AFTER":
-            fold_axis_3d = _apply_rotation(rot, (f.axis[0], f.axis[1], 0.0))
+            f_axis_3d = _apply_rotation(rot, (f.axis[0], f.axis[1], 0.0))
             rotation_angle = (-f.angle + math.pi) if back else f.angle
-            fold_rot = _rotation_matrix_around_axis(fold_axis_3d, rotation_angle)
+            fold_rot = _rotation_matrix_around_axis(f_axis_3d, rotation_angle)
             rot = _multiply_matrices(fold_rot, rot)
-            # We don't need to track origin precisely here - we'll use transform_point
 
     fold_axis_3d = _apply_rotation(rot, (fold_def.axis[0], fold_def.axis[1], 0.0))
     fold_perp_3d = _apply_rotation(rot, (fold_def.perp[0], fold_def.perp[1], 0.0))
     up_3d = _apply_rotation(rot, (0.0, 0.0, 1.0))
 
-    # Cylinder axis position: at the BEFORE boundary of the fold
-    # The fold axis (rotation center) is at perp_dist = -hw from fold center
-    # For back entry, the axis is at the opposite side (+hw)
-    if entered_from_back:
-        axis_perp_offset = hw
-    else:
-        axis_perp_offset = -hw
+    # Derive fold_center_3d from a reference point on the +hw boundary.
+    # Using the +hw boundary avoids a parallel-fold edge case: when two folds
+    # share the same perpendicular line (e.g., y=8 on both bars of an H-shape),
+    # the fold center (perp=0 from the other fold) gives negative excess in
+    # transform_point's AFTER step, producing wrong results. The +hw boundary
+    # has excess=0 (exactly at the zone edge), which is handled correctly.
+    ref_2d = (fold_def.center[0] + hw * fold_def.perp[0],
+              fold_def.center[1] + hw * fold_def.perp[1])
+    ref_3d = transform_point(ref_2d, prior_recipe)
+    fold_center_3d = _sub(ref_3d, _scale(fold_perp_3d, hw))
 
-    # Get the fold center in 3D
-    # Use a reference point at fold center with prior recipe to get 3D position
-    fold_center_2d = fold_def.center
-    center_ref_2d = (
-        fold_center_2d[0] + axis_perp_offset * fold_def.perp[0],
-        fold_center_2d[1] + axis_perp_offset * fold_def.perp[1],
-    )
-    # surface_before_3d: the PCB surface point at the BEFORE boundary of the fold zone
-    surface_before_3d = transform_point(center_ref_2d, prior_recipe)
-
-    # The rotation center is displaced from the surface point by R * up_3d
-    # (sign of fold angle determines which side: positive angle folds upward)
     sign_angle = 1.0 if fold_def.angle >= 0 else -1.0
-    cyl_origin_3d = _add(surface_before_3d, _scale(up_3d, sign_angle * R))
 
-    # cyl_ref points FROM rotation center TO the initial surface point (theta=0)
+    # For back entry, the BFS enters from the +hw side. The cylinder's
+    # entry surface is at +hw and it sweeps toward -hw. This reverses the
+    # cylinder axis direction (tangent = -perp instead of +perp).
+    if entered_from_back:
+        surface_entry_3d = _add(fold_center_3d, _scale(fold_perp_3d, hw))
+    else:
+        surface_entry_3d = _sub(fold_center_3d, _scale(fold_perp_3d, hw))
+
+    # Rotation center is displaced from entry surface by R * up_3d
+    cyl_origin_3d = _add(surface_entry_3d, _scale(up_3d, sign_angle * R))
+
+    # cyl_ref points FROM rotation center TO entry surface (theta=0)
     cyl_ref = _normalize(_scale(up_3d, -sign_angle))
 
-    # Cylinder axis direction depends on angle sign.
-    # We need cross(cyl_axis, cyl_ref) = fold_perp_3d for correct sweep direction.
-    # With cyl_ref = -sign*up, this requires cyl_axis = sign*fold_axis.
-    cyl_axis = _normalize(_scale(fold_axis_3d, sign_angle))
+    # Cylinder axis: for back entry, negate to reverse the sweep direction
+    axis_sign = -sign_angle if entered_from_back else sign_angle
+    cyl_axis = _normalize(_scale(fold_axis_3d, axis_sign))
 
-    # For positive angle (center above surface): bottom is further from center
-    # For negative angle (center below surface): bottom is closer to center
+    # For back entry, theta range is reversed: perp=-hw maps to theta=|angle|
+    # in the original parametrization, but to theta_step=0 on the back-entry
+    # cylinder. So theta_step = |angle| - theta_original.
+    if entered_from_back:
+        theta_min = abs(fold_def.angle) - frac_max * abs(fold_def.angle)
+        theta_max = abs(fold_def.angle) - frac_min * abs(fold_def.angle)
+    else:
+        theta_min = frac_min * abs(fold_def.angle)
+        theta_max = frac_max * abs(fold_def.angle)
+
+    # Inner/outer radius depends on angle sign (which side the center is on)
     if sign_angle >= 0:
         inner_radius = R
         outer_radius = R + thickness
@@ -503,8 +505,8 @@ def _build_bend_region_solid(writer, region, recipe_with_defs, thickness):
         inner_radius = R - thickness
         outer_radius = R
 
-    # Along values are in fold_axis direction; project onto cyl_axis = sign*fold_axis
-    if sign_angle >= 0:
+    # Along values in fold_axis direction; project onto cyl_axis
+    if axis_sign >= 0:
         along_min_cyl = along_min
         along_max_cyl = along_max
     else:
