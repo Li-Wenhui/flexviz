@@ -589,13 +589,13 @@ class FlexViewerFrame(wx.Frame):
 
         self.cb_traces = wx.CheckBox(control_panel, label="Show Traces")
         self.cb_traces.SetToolTip("Display copper traces on the PCB")
-        self.cb_traces.SetValue(True)
+        self.cb_traces.SetValue(False)
         self.cb_traces.Bind(wx.EVT_CHECKBOX, self.on_display_option_changed)
         display_sizer.Add(self.cb_traces, 0, wx.ALL, 3)
 
         self.cb_pads = wx.CheckBox(control_panel, label="Show Pads")
         self.cb_pads.SetToolTip("Display component pads and through-holes")
-        self.cb_pads.SetValue(True)
+        self.cb_pads.SetValue(False)
         self.cb_pads.Bind(wx.EVT_CHECKBOX, self.on_display_option_changed)
         display_sizer.Add(self.cb_pads, 0, wx.ALL, 3)
 
