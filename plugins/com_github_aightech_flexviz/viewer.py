@@ -1216,7 +1216,11 @@ class FlexViewerFrame(wx.Frame):
                     if success:
                         wx.MessageBox(f"Exported to:\n{path}", "Export Complete", wx.OK | wx.ICON_INFORMATION)
                     else:
-                        wx.MessageBox("STEP export failed. Check console for details.", "Export Error", wx.OK | wx.ICON_ERROR)
+                        wx.MessageBox("STEP export failed.", "Export Error", wx.OK | wx.ICON_ERROR)
+                except Exception as e:
+                    import traceback
+                    err_msg = f"STEP export error:\n\n{e}\n\n{traceback.format_exc()}"
+                    wx.MessageBox(err_msg, "Export Error", wx.OK | wx.ICON_ERROR)
                 finally:
                     wx.EndBusyCursor()
 
