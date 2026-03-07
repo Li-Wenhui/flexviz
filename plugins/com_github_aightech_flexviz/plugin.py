@@ -33,9 +33,15 @@ def reload_plugin_modules():
         'viewer',
     ]
 
+    # Determine actual package name from this module
+    package = __name__.rsplit('.', 1)[0] if '.' in __name__ else ''
+
     for name in module_names:
-        # Try both relative and absolute imports
-        for full_name in [f'kicad_flex_viewer.{name}', name]:
+        # Try package-qualified, bare, and legacy names
+        candidates = [name]
+        if package:
+            candidates.insert(0, f'{package}.{name}')
+        for full_name in candidates:
             if full_name in sys.modules:
                 try:
                     importlib.reload(sys.modules[full_name])
@@ -128,6 +134,13 @@ class OpenViewerAction(pcbnew.ActionPlugin):
                     wx.OK | wx.ICON_WARNING
                 )
                 return
+
+            # Save current board state so we read the latest positions
+            # (KiCad may have unsaved changes that differ from the file on disk)
+            try:
+                pcbnew.SaveBoard(board_path, board)
+            except Exception:
+                pass  # If save fails, proceed with file on disk
 
             # Parse the board
             from .config import FlexConfig

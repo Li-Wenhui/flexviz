@@ -1099,6 +1099,16 @@ class FlexViewerFrame(wx.Frame):
             return
 
         try:
+            # Save current KiCad board state before reloading
+            # (ensures we read latest positions even if user hasn't saved)
+            try:
+                import pcbnew
+                board = pcbnew.GetBoard()
+                if board:
+                    pcbnew.SaveBoard(self.pcb_filepath, board)
+            except Exception:
+                pass  # Running outside KiCad or save failed
+
             # Reload PCB from disk
             self.pcb = KiCadPCB.load(self.pcb_filepath)
             self.board_geometry = extract_geometry(self.pcb)

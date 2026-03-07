@@ -638,5 +638,207 @@ class TestHShapePCB:
 
         for pad in th_pads:
             mesh = create_pad_mesh(pad, 0.08, regions, board.thickness)
-            assert len(mesh.vertices) > 0
-            assert len(mesh.faces) > 0
+            # Pads inside the board should render; those outside may be empty
+            if find_containing_region(pad.center, regions) is not None:
+                assert len(mesh.vertices) > 0
+                assert len(mesh.faces) > 0
+
+
+class TestThroughHoleBugs:
+    """Tests for through-hole pad specific bugs (Phase 1.2)."""
+
+    def test_oval_drill_parsing(self):
+        """Oval drills like (drill oval 0.8 1.7) should parse correctly."""
+        pcb = KiCadPCB.load(
+            Path(__file__).parent / 'test_data' / 'h_shape.kicad_pcb'
+        )
+        fps = pcb.get_footprints()
+        # Audio jack has oval drills
+        oval_pads = [
+            p for fp in fps for p in fp.pads
+            if p.pad_type == 'thru_hole' and p.shape == 'roundrect'
+        ]
+        assert len(oval_pads) > 0, "Should find through-hole roundrect pads"
+        for pad in oval_pads:
+            assert pad.drill > 0, (
+                f"Oval drill should parse to > 0, got {pad.drill}"
+            )
+
+    def test_oval_drill_max_dimension(self):
+        """Oval drill (drill oval 0.8 1.7) should use max dimension = 1.7."""
+        pcb = KiCadPCB.load(
+            Path(__file__).parent / 'test_data' / 'h_shape.kicad_pcb'
+        )
+        fps = pcb.get_footprints()
+        oval_pads = [
+            p for fp in fps for p in fp.pads
+            if p.pad_type == 'thru_hole' and p.shape == 'roundrect'
+        ]
+        for pad in oval_pads:
+            assert pad.drill == 1.7, (
+                f"Expected max(0.8, 1.7) = 1.7, got {pad.drill}"
+            )
+
+    def test_wildcard_cu_layer(self):
+        """Through-hole pads with *.Cu should resolve to F.Cu or B.Cu."""
+        pcb = KiCadPCB.load(
+            Path(__file__).parent / 'test_data' / 'h_shape.kicad_pcb'
+        )
+        board = extract_geometry(pcb)
+        # J1 Conn_01x02 is on F.Cu with *.Cu pads
+        j1 = [c for c in board.components
+              if c.reference == 'J1' and c.center == (5.0, 12.0)][0]
+        for pad in j1.pads:
+            assert pad.layer == 'F.Cu', (
+                f"Through-hole pad on F.Cu footprint should be F.Cu, got {pad.layer}"
+            )
+
+    def test_through_hole_pad_region_fallback(self):
+        """Through-hole pads with center in drill hole should find region via fallback."""
+        pcb = KiCadPCB.load(
+            Path(__file__).parent / 'test_data' / 'h_shape.kicad_pcb'
+        )
+        board = extract_geometry(pcb)
+        markers = detect_fold_markers(pcb, layer='User.1')
+        outline_verts = [(v[0], v[1]) for v in board.outline.vertices]
+        cutout_verts = [[(v[0], v[1]) for v in c.vertices]
+                        for c in (board.cutouts or [])]
+        regions = split_board_into_regions(
+            outline_verts, cutout_verts, markers, num_bend_subdivisions=4
+        )
+
+        # J1 pads have drill holes — center is in cutout
+        j1 = [c for c in board.components
+              if c.reference == 'J1' and c.center == (5.0, 12.0)][0]
+        for pad in j1.pads:
+            assert pad.drill > 0
+            # Center should be in a cutout (returns None)
+            center_region = find_containing_region(pad.center, regions)
+            assert center_region is None, "Pad center should be in drill hole cutout"
+
+            # But pad mesh should still render (fallback to polygon vertices)
+            mesh = create_pad_mesh(pad, 0.08, regions, board.thickness)
+            assert len(mesh.vertices) > 0, "Through-hole pad should render via fallback"
+
+    def test_through_hole_3d_distance_preserved(self):
+        """3D distance between trace endpoint and through-hole pad should match 2D."""
+        from geometry import pad_to_polygon
+
+        pcb = KiCadPCB.load(
+            Path(__file__).parent / 'test_data' / 'h_shape.kicad_pcb'
+        )
+        board = extract_geometry(pcb)
+        markers = detect_fold_markers(pcb, layer='User.1')
+        outline_verts = [(v[0], v[1]) for v in board.outline.vertices]
+        cutout_verts = [[(v[0], v[1]) for v in c.vertices]
+                        for c in (board.cutouts or [])]
+        regions = split_board_into_regions(
+            outline_verts, cutout_verts, markers, num_bend_subdivisions=4
+        )
+
+        j1 = [c for c in board.components
+              if c.reference == 'J1' and c.center == (5.0, 12.0)][0]
+        # Trace endpoint (5, 11.5) on net 3
+        trace_ep = (5.0, 11.5)
+        trace_region = find_containing_region(trace_ep, regions)
+        assert trace_region is not None
+        trace_recipe = get_region_recipe(trace_region)
+        trace_3d, _ = transform_point_and_normal(trace_ep, trace_recipe)
+
+        for pad in j1.pads:
+            # Find pad region via fallback
+            pad_region = find_containing_region(pad.center, regions)
+            if not pad_region:
+                poly = pad_to_polygon(pad)
+                for v in poly.vertices:
+                    pad_region = find_containing_region(v, regions)
+                    if pad_region:
+                        break
+            assert pad_region is not None
+            pad_recipe = get_region_recipe(pad_region)
+            pad_3d, _ = transform_point_and_normal(pad.center, pad_recipe)
+
+            dist_2d = math.sqrt(
+                (pad.center[0] - trace_ep[0])**2 +
+                (pad.center[1] - trace_ep[1])**2
+            )
+            dist_3d = math.sqrt(
+                sum((a - b)**2 for a, b in zip(pad_3d, trace_3d))
+            )
+            assert abs(dist_3d - dist_2d) < 0.5, (
+                f"3D distance {dist_3d:.2f} should be close to "
+                f"2D distance {dist_2d:.2f}"
+            )
+
+    def test_rotated_component_bbox_contains_pads(self):
+        """Bounding box for rotated components should include all pad positions."""
+        pcb = KiCadPCB.load(
+            Path(__file__).parent / 'test_data' / 'h_shape.kicad_pcb'
+        )
+        board = extract_geometry(pcb)
+        for comp in board.components:
+            if comp.angle == 0:
+                continue
+            bb = comp.bounding_box
+            for pad in comp.pads:
+                cx, cy = pad.center
+                assert bb.min_x - 0.2 <= cx <= bb.max_x + 0.2, (
+                    f"{comp.reference} pad ({cx:.2f},{cy:.2f}) x outside "
+                    f"bbox [{bb.min_x:.2f},{bb.max_x:.2f}]"
+                )
+                assert bb.min_y - 0.2 <= cy <= bb.max_y + 0.2, (
+                    f"{comp.reference} pad ({cx:.2f},{cy:.2f}) y outside "
+                    f"bbox [{bb.min_y:.2f},{bb.max_y:.2f}]"
+                )
+
+    def test_component_per_vertex_region_lookup(self):
+        """Component boxes should use per-vertex region lookup for fold boundaries."""
+        from mesh import create_component_mesh
+
+        pcb = KiCadPCB.load(
+            Path(__file__).parent / 'test_data' / 'h_shape.kicad_pcb'
+        )
+        board = extract_geometry(pcb)
+        markers = detect_fold_markers(pcb, layer='User.1')
+        outline_verts = [(v[0], v[1]) for v in board.outline.vertices]
+        cutout_verts = [[(v[0], v[1]) for v in c.vertices]
+                        for c in (board.cutouts or [])]
+        regions = split_board_into_regions(
+            outline_verts, cutout_verts, markers, num_bend_subdivisions=1
+        )
+
+        # J1 at (5,12) spans fold boundary at y=12.05
+        j1 = [c for c in board.components
+              if c.reference == 'J1' and c.center == (5.0, 12.0)][0]
+
+        mesh = create_component_mesh(j1, 2.0, regions, board.thickness)
+        assert len(mesh.vertices) > 0
+
+        # Box bottom vertices should be on the board surface
+        import numpy as np
+        verts = np.array(mesh.vertices)
+        # Bottom vertices = first N/2 vertices
+        n = len(verts) // 2
+        bottom = verts[:n]
+
+        # Each bottom vertex should be close to the board surface
+        # (within z_offset + small tolerance)
+        for bv in bottom:
+            # Find a board surface point nearby
+            found_close = False
+            for r in regions:
+                recipe = get_region_recipe(r)
+                # Check if this bottom vertex is close to any region's transform
+                # of a point with similar x,y
+                for rv in r.outline[:4]:
+                    v3d, _ = transform_point_and_normal(rv, recipe)
+                    dist = math.sqrt(sum((a-b)**2 for a, b in zip(bv, v3d)))
+                    if dist < 3.0:  # within 3mm of some board vertex
+                        found_close = True
+                        break
+                if found_close:
+                    break
+            assert found_close, (
+                f"Component vertex ({bv[0]:.2f}, {bv[1]:.2f}, {bv[2]:.2f}) "
+                f"not near any board surface"
+            )

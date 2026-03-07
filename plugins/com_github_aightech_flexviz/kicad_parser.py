@@ -1134,7 +1134,13 @@ class KiCadPCB:
                 drill_expr = pad_expr['drill']
                 drill = 0
                 if drill_expr:
-                    drill = drill_expr.get_float(0)
+                    # Handle oval drills: (drill oval X Y) vs round: (drill D)
+                    first = drill_expr.get_string(0) if drill_expr.children else ""
+                    if first == "oval":
+                        # Oval drill: use max dimension for cutout circle
+                        drill = max(drill_expr.get_float(1), drill_expr.get_float(2))
+                    else:
+                        drill = drill_expr.get_float(0)
 
                 pad_layers = []
                 layers_expr = pad_expr['layers']
@@ -1182,14 +1188,14 @@ class KiCadPCB:
         footprints = self.get_footprints()
 
         for fp in footprints:
-            fp_angle_rad = math.radians(fp.at_angle)
+            # KiCad Y-down coords: negate angle for standard math rotation
+            fp_angle_rad = math.radians(-fp.at_angle)
             cos_a = math.cos(fp_angle_rad)
             sin_a = math.sin(fp_angle_rad)
 
             for pad in fp.pads:
                 if pad.drill > 0:
                     # Rotate pad offset by footprint angle
-                    # KiCad uses clockwise rotation for positive angles
                     rotated_x = pad.at_x * cos_a - pad.at_y * sin_a
                     rotated_y = pad.at_x * sin_a + pad.at_y * cos_a
 

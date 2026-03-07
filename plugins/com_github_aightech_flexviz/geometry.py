@@ -288,10 +288,14 @@ def extract_geometry(pcb: KiCadPCB) -> BoardGeometry:
     # Get components
     components = []
     for fp in pcb.get_footprints():
-        # Calculate bounding box from pads
+        # Calculate bounding box from pads (with footprint rotation applied)
+        # KiCad uses Y-down coords: negate angle for standard math rotation
         if fp.pads:
-            pad_xs = [fp.at_x + p.at_x for p in fp.pads]
-            pad_ys = [fp.at_y + p.at_y for p in fp.pads]
+            angle_rad = math.radians(-fp.at_angle)
+            cos_a = math.cos(angle_rad)
+            sin_a = math.sin(angle_rad)
+            pad_xs = [p.at_x * cos_a - p.at_y * sin_a + fp.at_x for p in fp.pads]
+            pad_ys = [p.at_x * sin_a + p.at_y * cos_a + fp.at_y for p in fp.pads]
             pad_sizes = [max(p.size_x, p.size_y) / 2 for p in fp.pads]
 
             min_x = min(x - s for x, s in zip(pad_xs, pad_sizes))
@@ -310,7 +314,8 @@ def extract_geometry(pcb: KiCadPCB) -> BoardGeometry:
         pads = []
         for p in fp.pads:
             # Transform pad position by component position and rotation
-            angle_rad = math.radians(fp.at_angle)
+            # KiCad uses Y-down coords: negate angle for standard math rotation
+            angle_rad = math.radians(-fp.at_angle)
             cos_a = math.cos(angle_rad)
             sin_a = math.sin(angle_rad)
 
@@ -319,20 +324,22 @@ def extract_geometry(pcb: KiCadPCB) -> BoardGeometry:
             py = p.at_x * sin_a + p.at_y * cos_a + fp.at_y
 
             # Determine pad layer from pad's layers list or component layer
-            # SMD pads: use pad's layer if available, else component layer
-            # Through-hole: use component layer for visualization
+            # Through-hole pads use "*.Cu" wildcard matching all copper layers
             pad_layer = fp.layer
             if p.layers:
-                if "B.Cu" in p.layers and "F.Cu" not in p.layers:
+                has_all_cu = any(l == "*.Cu" for l in p.layers)
+                has_f_cu = "F.Cu" in p.layers or has_all_cu
+                has_b_cu = "B.Cu" in p.layers or has_all_cu
+                if has_b_cu and not has_f_cu:
                     pad_layer = "B.Cu"
-                elif "F.Cu" in p.layers:
+                elif has_f_cu:
                     pad_layer = "F.Cu"
 
             pads.append(PadGeometry(
                 center=(px, py),
                 shape=p.shape,
                 size=(p.size_x, p.size_y),
-                angle=p.at_angle + fp.at_angle,
+                angle=-p.at_angle,  # File stores global angle; negate for Y-down
                 drill=p.drill,
                 layer=pad_layer
             ))

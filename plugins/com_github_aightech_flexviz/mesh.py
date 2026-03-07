@@ -1136,12 +1136,25 @@ def create_pad_mesh(
         # First try the pad center
         fallback_region = find_containing_region(pad.center, regions)
 
-        # If center is in a cutout (drill hole), try pad polygon vertices
+        # If center is in a cutout (drill hole), try small offsets
+        if not fallback_region:
+            cx, cy = pad.center
+            offset = max(pad.drill / 2, 0.3) + 0.1 if pad.drill > 0 else 0.3
+            for dx, dy in [(offset, 0), (-offset, 0), (0, offset), (0, -offset)]:
+                fallback_region = find_containing_region((cx + dx, cy + dy), regions)
+                if fallback_region:
+                    break
+
+        # Still not found? Try pad polygon vertices
         if not fallback_region and poly.vertices:
             for v in poly.vertices:
                 fallback_region = find_containing_region((v[0], v[1]), regions)
                 if fallback_region:
                     break
+
+    # Skip pads completely outside the board (no region found after all fallbacks)
+    if regions and not fallback_region:
+        return mesh
 
     fallback_recipe = get_region_recipe(fallback_region) if fallback_region else []
 
@@ -1265,15 +1278,30 @@ def create_component_mesh(
     box = component_to_box(component)
 
     # Find which region the component is in
-    # Try center first, then box corners if center is in a cutout
+    # Try center, nearby offsets, box corners, then pad positions
     region_recipe = []
 
     if regions:
         containing_region = find_containing_region(component.center, regions)
 
+        # If center is in a cutout (drill hole), try small offsets
+        if not containing_region:
+            cx, cy = component.center
+            for dx, dy in [(0.5, 0), (-0.5, 0), (0, 0.5), (0, -0.5)]:
+                containing_region = find_containing_region((cx + dx, cy + dy), regions)
+                if containing_region:
+                    break
+
         if not containing_region and box.vertices:
             for v in box.vertices:
                 containing_region = find_containing_region((v[0], v[1]), regions)
+                if containing_region:
+                    break
+
+        # Try pad positions for through-hole components
+        if not containing_region:
+            for pad in component.pads:
+                containing_region = find_containing_region(pad.center, regions)
                 if containing_region:
                     break
 
@@ -1283,11 +1311,16 @@ def create_component_mesh(
     # Determine if component is on back layer
     is_back_layer = component.layer == "B.Cu"
 
-    # Transform vertices and get normals
+    # Transform vertices with per-vertex region lookup
     base_3d = []
     normals = []
     for v in box.vertices:
-        v3d, normal = transform_point_and_normal(v, region_recipe)
+        recipe = region_recipe
+        if regions:
+            v_region = find_containing_region((v[0], v[1]), regions)
+            if v_region:
+                recipe = get_region_recipe(v_region)
+        v3d, normal = transform_point_and_normal(v, recipe)
         base_3d.append(v3d)
         normals.append(normal)
 
@@ -1585,12 +1618,21 @@ def create_component_3d_model_mesh(
         return mesh
 
     # Find which region the component is in
-    # Try center first, then bounding box corners if center is in a cutout
+    # Try center first, then nearby offsets (for drill hole avoidance),
+    # then bounding box corners, then pad positions
     region_recipe = []
     if regions:
         containing_region = find_containing_region(component.center, regions)
 
-        # If center is in a cutout, try bounding box corners
+        # If center is in a cutout (drill hole), try small offsets around center
+        if not containing_region:
+            cx, cy = component.center
+            for dx, dy in [(0.5, 0), (-0.5, 0), (0, 0.5), (0, -0.5)]:
+                containing_region = find_containing_region((cx + dx, cy + dy), regions)
+                if containing_region:
+                    break
+
+        # Try bounding box corners
         if not containing_region:
             box = component_to_box(component)
             if box.vertices:
@@ -1598,6 +1640,21 @@ def create_component_3d_model_mesh(
                     containing_region = find_containing_region((v[0], v[1]), regions)
                     if containing_region:
                         break
+
+        # Try pad positions (most reliable for through-hole components)
+        if not containing_region:
+            for pad in component.pads:
+                containing_region = find_containing_region(pad.center, regions)
+                if containing_region:
+                    break
+                # Try pad polygon vertices if pad center is in drill hole
+                poly = pad_to_polygon(pad)
+                for v in poly.vertices:
+                    containing_region = find_containing_region(v, regions)
+                    if containing_region:
+                        break
+                if containing_region:
+                    break
 
         if containing_region:
             region_recipe = get_region_recipe(containing_region)
@@ -1687,8 +1744,15 @@ def create_component_3d_model_mesh(
             local_x = component.center[0] + x
             local_y = component.center[1] + y
 
-            # Transform the base position using the region recipe
-            base_3d, normal = transform_point_and_normal((local_x, local_y), region_recipe)
+            # Per-vertex region lookup for correct fold transform
+            v_recipe = region_recipe
+            if regions:
+                v_region = find_containing_region((local_x, local_y), regions)
+                if v_region:
+                    v_recipe = get_region_recipe(v_region)
+
+            # Transform the base position using the vertex's region recipe
+            base_3d, normal = transform_point_and_normal((local_x, local_y), v_recipe)
 
             # Apply Z offset along the surface normal
             final_x = base_3d[0] + normal[0] * z
