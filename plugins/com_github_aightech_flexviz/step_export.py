@@ -6,6 +6,7 @@ Pure Python — no external dependencies. Uses StepWriter to emit B-Rep geometry
 """
 
 import math
+import os
 from dataclasses import dataclass
 
 try:
@@ -543,7 +544,7 @@ def _build_bend_region_solid(writer, region, recipe_with_defs, thickness):
         inner_corners, outer_corners,
         cyl_origin_3d, cyl_axis, cyl_ref,
         inner_radius, outer_radius,
-        end_cap_pairs=None  # end caps computed inside build_bend_solid
+        end_cap_pairs=None
     )
 
 
@@ -579,6 +580,7 @@ def _build_flat_region_solid(writer, region, recipe_with_defs, thickness,
     """Build a flat extruded solid for a region.
 
     When original_segments are provided, recovers arc info for exact geometry.
+    Returns MANIFOLD_SOLID_BREP entity ID.
     """
     normal = _compute_region_normal(region, recipe_with_defs)
 
@@ -617,8 +619,70 @@ def _build_flat_region_solid(writer, region, recipe_with_defs, thickness,
     return writer.build_flat_solid(outline_3d, holes_3d if holes_3d else None, normal, thickness)
 
 
+def _build_bend_region_faces(writer, region, recipe_with_defs, thickness):
+    """Like _build_bend_region_solid but returns face IDs (no shell/brep)."""
+    fold_def = None
+    entered_from_back = False
+    for entry in reversed(recipe_with_defs):
+        if entry[1] == "IN_ZONE":
+            fold_def = entry[0]
+            entered_from_back = entry[2] if len(entry) > 2 else False
+            break
+    if fold_def is None:
+        return _build_flat_region_faces(writer, region, recipe_with_defs, thickness)
+    # Reuse the solid builder's full logic but call build_bend_faces
+    # We duplicate the geometry computation from _build_bend_region_solid
+    # to avoid maintaining two copies. Instead, delegate:
+    brep_id = _build_bend_region_solid(writer, region, recipe_with_defs, thickness)
+    # Extract face IDs from the CLOSED_SHELL that wraps this brep
+    # The brep entity is MANIFOLD_SOLID_BREP('',#shell), shell is brep_id-1
+    shell_id = brep_id - 1
+    for eid, text in reversed(writer._entities):
+        if eid == shell_id and text.startswith("CLOSED_SHELL"):
+            import re as _re
+            face_refs = _re.findall(r'#(\d+)', text)
+            # Remove shell + brep entities (they'll be recreated for the merged solid)
+            writer._entities = [(e, t) for e, t in writer._entities
+                                if e != shell_id and e != brep_id]
+            return [int(r) for r in face_refs]
+    return []
+
+
+def _build_flat_region_faces(writer, region, recipe_with_defs, thickness,
+                             original_segments=None, circle_cutouts=None,
+                             drill_holes=None):
+    """Like _build_flat_region_solid but returns face IDs (no shell/brep)."""
+    normal = _compute_region_normal(region, recipe_with_defs)
+
+    if original_segments:
+        tagged_edges = _recover_arcs(region.outline, original_segments)
+        has_arcs = any(e.type == 'arc' for e in tagged_edges)
+        if has_arcs:
+            top_edges_3d = _transform_tagged_edges_3d(tagged_edges, recipe_with_defs, normal)
+            hole_data = None
+            if region.holes:
+                hole_data = []
+                for hole in region.holes:
+                    n_h = len(hole)
+                    hole_edges_2d = [TaggedEdge(type="line", start=hole[k],
+                                                end=hole[(k+1) % n_h])
+                                     for k in range(n_h)]
+                    hole_edges_3d = _transform_tagged_edges_3d(
+                        hole_edges_2d, recipe_with_defs, normal)
+                    hole_data.append(('polygon', hole_edges_3d))
+            return writer.build_flat_faces_mixed(
+                top_edges_3d, normal, thickness, hole_data=hole_data)
+
+    outline_3d = _snap_to_plane(
+        _transform_polygon_3d(region.outline, recipe_with_defs), normal)
+    holes_3d = [_snap_to_plane(_transform_polygon_3d(h, recipe_with_defs), normal)
+                for h in region.holes]
+    return writer.build_flat_faces(outline_3d, holes_3d if holes_3d else None, normal, thickness)
+
+
 def board_to_step_native(board_geometry, markers, filename, config=None,
-                         pcb=None, stiffeners=None):
+                         pcb=None, stiffeners=None, pcb_dir=None,
+                         include_models=False, include_wrl_models=False):
     """
     Export board geometry to STEP file using pure Python.
 
@@ -629,6 +693,9 @@ def board_to_step_native(board_geometry, markers, filename, config=None,
         config: FlexConfig (optional, for stiffener settings)
         pcb: KiCadPCB (optional, for stiffener extraction)
         stiffeners: pre-extracted stiffener list (optional)
+        pcb_dir: directory of PCB file for resolving model paths
+        include_models: if True, export 3D component models
+        include_wrl_models: if True, also export WRL-only models (no STEP equivalent)
 
     Returns:
         True on success, False on error
@@ -662,22 +729,26 @@ def board_to_step_native(board_geometry, markers, filename, config=None,
             num_bend_subdivisions=1
         )
 
-        # Build a solid for each region
+        # Collect all faces from every region into one merged solid
+        all_pcb_faces = []
         for region in regions:
-            # Convert fold_recipe markers to FoldDefinitions
             recipe_defs = _recipe_with_fold_defs(region.fold_recipe)
 
             if _is_bend_region(region.fold_recipe):
-                brep_id = _build_bend_region_solid(writer, region, recipe_defs, thickness)
+                face_ids = _build_bend_region_faces(writer, region, recipe_defs, thickness)
             else:
-                brep_id = _build_flat_region_solid(
+                face_ids = _build_flat_region_faces(
                     writer, region, recipe_defs, thickness,
                     original_segments=original_segments,
                     circle_cutouts=circle_cutouts,
                     drill_holes=drill_holes,
                 )
+            all_pcb_faces.extend(face_ids)
 
-            writer.add_body(brep_id, f"FLEX_PCB_{region.index}")
+        # One MANIFOLD_SOLID_BREP for the entire PCB
+        shell_id = writer.closed_shell(all_pcb_faces)
+        brep_id = writer.manifold_solid_brep(shell_id)
+        writer.add_body(brep_id, "FLEX_PCB")
 
         # Handle stiffeners
         if stiffeners is None and config is not None and pcb is not None:
@@ -719,6 +790,14 @@ def board_to_step_native(board_geometry, markers, filename, config=None,
                 )
                 writer.add_body(brep_id, f"STIFFENER_{stiff_idx}")
 
+        # Handle 3D component models
+        if include_models and board_geometry.components:
+            _export_component_models(
+                writer, board_geometry, regions, thickness,
+                pcb_dir=pcb_dir, pcb=pcb,
+                include_wrl=include_wrl_models,
+            )
+
         writer.write(filename)
         return True
 
@@ -727,3 +806,247 @@ def board_to_step_native(board_geometry, markers, filename, config=None,
         import traceback
         traceback.print_exc()
         return False
+
+
+def _resolve_model_path_for_step(model_path, pcb_dir=None, pcb=None,
+                                  include_wrl=False):
+    """Resolve a component model path, preferring STEP over WRL.
+
+    For WRL models, checks if a STEP version exists in the same folder.
+    Only returns WRL paths if include_wrl is True and no STEP alternative exists.
+
+    Returns:
+        Resolved absolute path, or None if not found/not allowed.
+    """
+    try:
+        from .model_loader import expand_kicad_vars
+    except ImportError:
+        from model_loader import expand_kicad_vars
+
+    resolved = expand_kicad_vars(model_path, pcb_dir, pcb)
+    if resolved is None:
+        return None
+
+    ext = os.path.splitext(resolved)[1].lower()
+
+    if ext in ('.step', '.stp'):
+        return resolved
+
+    if ext in ('.wrl', '.vrml'):
+        # Check if a STEP version exists in the same folder
+        base = os.path.splitext(resolved)[0]
+        for step_ext in ('.step', '.stp'):
+            step_path = base + step_ext
+            if os.path.exists(step_path):
+                return step_path
+
+        # No STEP alternative — only return WRL if explicitly allowed
+        if include_wrl:
+            return resolved
+        return None
+
+    # Other formats — skip for STEP export
+    return None
+
+
+def _compute_component_placement(comp, model_info, thickness, regions):
+    """Compute the STEP placement (origin, z_axis, x_axis) for a component.
+
+    Combines model offset/scale/rotation, component rotation, position,
+    back-layer mirroring, and fold recipe transforms into a single
+    AXIS2_PLACEMENT_3D for STEP assembly positioning.
+
+    Returns:
+        (origin, z_axis, x_axis) as 3-tuples, or None if placement fails.
+    """
+    # Build rotation matrix from component + model transforms
+    def rot_x(angle):
+        c, s = math.cos(angle), math.sin(angle)
+        return [[1, 0, 0], [0, c, -s], [0, s, c]]
+
+    def rot_y(angle):
+        c, s = math.cos(angle), math.sin(angle)
+        return [[c, 0, s], [0, 1, 0], [-s, 0, c]]
+
+    def rot_z(angle):
+        c, s = math.cos(angle), math.sin(angle)
+        return [[c, -s, 0], [s, c, 0], [0, 0, 1]]
+
+    def mat_mul(A, B):
+        return [[sum(A[i][k] * B[k][j] for k in range(3)) for j in range(3)]
+                for i in range(3)]
+
+    def mat_vec(M, v):
+        return tuple(sum(M[i][j] * v[j] for j in range(3)) for i in range(3))
+
+    is_back = comp.layer == "B.Cu"
+
+    # Model rotation (ZYX order as in apply_model_transform)
+    rz = rot_z(math.radians(model_info.rotate[2]))
+    ry = rot_y(math.radians(model_info.rotate[1]))
+    rx = rot_x(math.radians(model_info.rotate[0]))
+
+    # Component rotation (clockwise = negative Z rotation)
+    comp_rz = rot_z(math.radians(-comp.angle))
+
+    # Combined rotation: comp_rz @ rx @ ry @ rz (applied right-to-left)
+    rot = mat_mul(ry, rz)
+    rot = mat_mul(rx, rot)
+
+    # Apply scale (baked into rotation matrix columns)
+    sx, sy, sz = model_info.scale
+    for i in range(3):
+        rot[i][0] *= sx
+        rot[i][1] *= sy
+        rot[i][2] *= sz
+
+    rot = mat_mul(comp_rz, rot)
+
+    # Back layer mirror: flip Z
+    if is_back:
+        for i in range(3):
+            rot[i][2] = -rot[i][2]
+
+    # Compute origin: model offset → component rotation → back mirror → position
+    off = model_info.offset
+    origin = mat_vec(comp_rz, off)
+
+    if is_back:
+        origin = (origin[0], origin[1], -origin[2] - thickness)
+
+    origin = (origin[0] + comp.center[0],
+              origin[1] + comp.center[1],
+              origin[2])
+
+    # Apply fold recipe if in a folded region
+    containing_region = find_containing_region(comp.center, regions)
+    if containing_region is not None and containing_region.fold_recipe:
+        recipe_defs = _recipe_with_fold_defs(containing_region.fold_recipe)
+        normal = _compute_region_normal(containing_region, recipe_defs)
+        n = _normalize(normal)
+
+        # Transform origin (2D→3D via fold recipe, then add Z along normal)
+        base_3d = transform_point((origin[0], origin[1]), recipe_defs)
+        origin = _add(base_3d, _scale(n, origin[2]))
+
+        # Transform rotation axes through the fold
+        # We need to rotate the matrix columns through the fold recipe
+        # Use the fold's cumulative rotation
+        cum_rot = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+        for entry in recipe_defs:
+            f = entry[0]
+            c = entry[1]
+            back = entry[2] if len(entry) > 2 else False
+            if c == "AFTER":
+                f_axis_3d = _apply_rotation(cum_rot, (f.axis[0], f.axis[1], 0.0))
+                rotation_angle = (-f.angle + math.pi) if back else f.angle
+                fold_rot = _rotation_matrix_around_axis(f_axis_3d, rotation_angle)
+                cum_rot = _multiply_matrices(fold_rot, cum_rot)
+
+        # Rotate the placement axes through cumulative fold rotation
+        z_axis_raw = (rot[0][2], rot[1][2], rot[2][2])
+        x_axis_raw = (rot[0][0], rot[1][0], rot[2][0])
+        z_axis = _normalize(_apply_rotation(cum_rot, z_axis_raw))
+        x_axis = _normalize(_apply_rotation(cum_rot, x_axis_raw))
+    else:
+        z_axis = _normalize((rot[0][2], rot[1][2], rot[2][2]))
+        x_axis = _normalize((rot[0][0], rot[1][0], rot[2][0]))
+
+    return origin, z_axis, x_axis
+
+
+def _export_component_models(writer, board_geometry, regions, thickness,
+                              pcb_dir=None, pcb=None, include_wrl=False):
+    """Export 3D component models in the STEP file.
+
+    For STEP source models: embeds the original B-Rep entities directly
+    (preserving exact geometry) and positions via REPRESENTATION_RELATIONSHIP.
+    For WRL source models: tessellates to triangle mesh as fallback.
+
+    Identical STEP models are embedded once and reused across all instances.
+    """
+    try:
+        from .model_loader import load_model, apply_model_transform
+    except ImportError:
+        from model_loader import load_model, apply_model_transform
+
+    # Cache: resolved_path -> list of brep_ids (for STEP) or LoadedModel (for WRL)
+    step_embed_cache = {}   # path -> [brep_id, ...]
+    wrl_mesh_cache = {}     # path -> LoadedModel or None
+
+    for comp in board_geometry.components:
+        if not comp.models:
+            continue
+
+        for model_info in comp.models:
+            if model_info.hide:
+                continue
+
+            resolved = _resolve_model_path_for_step(
+                model_info.path, pcb_dir, pcb, include_wrl)
+            if resolved is None:
+                continue
+
+            ext = os.path.splitext(resolved)[1].lower()
+            is_step = ext in ('.step', '.stp')
+
+            if is_step:
+                # Embed STEP B-Rep directly (exact geometry, much smaller)
+                if resolved not in step_embed_cache:
+                    brep_ids = writer.embed_step_file(resolved)
+                    step_embed_cache[resolved] = brep_ids
+
+                brep_ids = step_embed_cache[resolved]
+                if brep_ids:
+                    # Compute placement transform for this component
+                    placement = _compute_component_placement(
+                        comp, model_info, thickness, regions)
+                    if placement:
+                        origin, z_axis, x_axis = placement
+                        writer.add_sub_assembly(brep_ids, comp.reference,
+                                                origin, z_axis, x_axis)
+            else:
+                # WRL: tessellate to triangles (fallback)
+                if resolved not in wrl_mesh_cache:
+                    wrl_mesh_cache[resolved] = load_model(resolved)
+                loaded = wrl_mesh_cache[resolved]
+                if loaded is None:
+                    continue
+
+                is_back = comp.layer == "B.Cu"
+                transformed_mesh = apply_model_transform(
+                    loaded.mesh, comp.center, comp.angle,
+                    model_info.offset, model_info.scale,
+                    model_info.rotate, thickness, is_back,
+                )
+
+                if not transformed_mesh.vertices or not transformed_mesh.faces:
+                    continue
+
+                # Apply fold recipe if component is in a folded region
+                containing_region = find_containing_region(comp.center, regions)
+                if containing_region is not None and containing_region.fold_recipe:
+                    recipe_defs = _recipe_with_fold_defs(containing_region.fold_recipe)
+                    normal = _compute_region_normal(containing_region, recipe_defs)
+                    n = _normalize(normal)
+                    verts_3d = []
+                    for v in transformed_mesh.vertices:
+                        base_3d = transform_point((v[0], v[1]), recipe_defs)
+                        verts_3d.append(_add(base_3d, _scale(n, v[2])))
+                else:
+                    verts_3d = [(v[0], v[1], v[2])
+                                for v in transformed_mesh.vertices]
+
+                tri_faces = []
+                for face in transformed_mesh.faces:
+                    if len(face) == 3:
+                        tri_faces.append(face)
+                    elif len(face) == 4:
+                        tri_faces.append((face[0], face[1], face[2]))
+                        tri_faces.append((face[0], face[2], face[3]))
+
+                brep_id = writer.build_tessellated_solid(verts_3d, tri_faces)
+                if brep_id is not None:
+                    writer.add_body(brep_id, comp.reference)
+
+            break  # Only use first valid model per component

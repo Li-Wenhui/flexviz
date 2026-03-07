@@ -584,7 +584,7 @@ def component_to_box(comp: ComponentGeometry) -> Polygon:
     ])
 
 
-def circle_to_polygon(center_x: float, center_y: float, radius: float, segments: int = 24) -> Polygon:
+def circle_to_polygon(center_x: float, center_y: float, radius: float, segments: int = 0) -> Polygon:
     """
     Convert a circle to a polygon approximation.
 
@@ -592,11 +592,16 @@ def circle_to_polygon(center_x: float, center_y: float, radius: float, segments:
         center_x: X coordinate of center
         center_y: Y coordinate of center
         radius: Circle radius
-        segments: Number of segments (more = smoother)
+        segments: Number of segments. 0 (default) = adaptive based on radius
+                  with ~2mm max segment length, minimum 8 segments.
 
     Returns:
         Polygon approximation of the circle
     """
+    if segments <= 0:
+        # Adaptive: ~2mm max chord length, minimum 8 segments
+        circumference = 2 * math.pi * radius
+        segments = max(8, int(math.ceil(circumference / 2.0)))
     vertices = []
     for i in range(segments):
         theta = 2 * math.pi * i / segments

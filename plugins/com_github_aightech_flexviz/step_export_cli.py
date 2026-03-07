@@ -36,6 +36,10 @@ def main():
     parser.add_argument('--stiffener-side', default='bottom',
                         choices=['top', 'bottom'],
                         help='Stiffener side (default: bottom)')
+    parser.add_argument('--include-models', action='store_true',
+                        help='Include 3D component models in STEP export')
+    parser.add_argument('--include-wrl-models', action='store_true',
+                        help='Also include WRL-only models (no STEP equivalent)')
     args = parser.parse_args()
 
     if not os.path.exists(args.input):
@@ -58,7 +62,13 @@ def main():
         stiffeners = extract_stiffeners(pcb, config)
         print(f"Stiffeners: {len(stiffeners) if stiffeners else 0} ({args.stiffener_side}, {args.stiffener_thickness}mm)")
 
-    ok = board_to_step_native(geom, markers, args.output, pcb=pcb, config=config, stiffeners=stiffeners)
+    pcb_dir = os.path.dirname(os.path.abspath(args.input))
+    ok = board_to_step_native(
+        geom, markers, args.output, pcb=pcb, config=config,
+        stiffeners=stiffeners, pcb_dir=pcb_dir,
+        include_models=args.include_models,
+        include_wrl_models=args.include_wrl_models,
+    )
     if ok:
         size = os.path.getsize(args.output)
         print(f"Exported: {args.output} ({size:,} bytes)")

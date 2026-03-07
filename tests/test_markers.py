@@ -20,6 +20,7 @@ from markers import (
     _lines_parallel,
     _distance_between_parallel_lines,
     _parse_angle_from_text,
+    _scan_variable_assignments,
 )
 
 
@@ -107,35 +108,101 @@ class TestParseAngle:
 
     def test_parse_simple_integer(self):
         """Test parsing simple integer angle."""
-        assert _parse_angle_from_text("90") == 90.0
+        assert _parse_angle_from_text("90") == (90.0, "")
 
     def test_parse_with_degree_symbol(self):
         """Test parsing angle with degree symbol."""
-        assert _parse_angle_from_text("90°") == 90.0
+        assert _parse_angle_from_text("90°") == (90.0, "")
 
     def test_parse_positive_sign(self):
         """Test parsing positive angle."""
-        assert _parse_angle_from_text("+90°") == 90.0
+        assert _parse_angle_from_text("+90°") == (90.0, "")
 
     def test_parse_negative_angle(self):
         """Test parsing negative angle."""
-        assert _parse_angle_from_text("-45°") == -45.0
+        assert _parse_angle_from_text("-45°") == (-45.0, "")
 
     def test_parse_decimal(self):
         """Test parsing decimal angle."""
-        assert _parse_angle_from_text("45.5") == 45.5
+        assert _parse_angle_from_text("45.5") == (45.5, "")
 
     def test_parse_with_deg_suffix(self):
         """Test parsing with 'deg' suffix."""
-        assert _parse_angle_from_text("90 deg") == 90.0
+        assert _parse_angle_from_text("90 deg") == (90.0, "")
 
     def test_parse_empty(self):
         """Test parsing empty string."""
-        assert _parse_angle_from_text("") is None
+        assert _parse_angle_from_text("")[0] is None
 
     def test_parse_invalid(self):
         """Test parsing invalid text."""
-        assert _parse_angle_from_text("not a number") is None
+        assert _parse_angle_from_text("not a number")[0] is None
+
+    def test_parse_variable(self):
+        """Test parsing variable reference."""
+        val, label = _parse_angle_from_text("a", {"a": 90.0})
+        assert val == 90.0
+        assert label == "a"
+
+    def test_parse_negated_variable(self):
+        """Test parsing negated variable."""
+        val, label = _parse_angle_from_text("-a", {"a": 45.0})
+        assert val == -45.0
+        assert label == "-a"
+
+    def test_parse_expression(self):
+        """Test parsing arithmetic expression."""
+        val, label = _parse_angle_from_text("a + 10", {"a": 80.0})
+        assert val == 90.0
+        assert label == "a + 10"
+
+    def test_parse_unassigned_variable_defaults_zero(self):
+        """Test that unassigned variables default to 0."""
+        val, label = _parse_angle_from_text("x", {})
+        assert val == 0.0
+        assert label == "x"
+
+    def test_parse_numeric_with_variables_dict(self):
+        """Test that numeric literals still work when variables are provided."""
+        val, label = _parse_angle_from_text("90°", {"a": 45.0})
+        assert val == 90.0
+        assert label == ""
+
+
+class TestScanVariables:
+    """Tests for variable assignment scanning."""
+
+    def test_simple_assignment(self):
+        texts = [{'text': 'a=90', 'x': 0, 'y': 0}]
+        assert _scan_variable_assignments(texts) == {'a': 90.0}
+
+    def test_assignment_with_spaces(self):
+        texts = [{'text': 'bend_angle = 45', 'x': 0, 'y': 0}]
+        assert _scan_variable_assignments(texts) == {'bend_angle': 45.0}
+
+    def test_negative_value(self):
+        texts = [{'text': 'x = -30.5', 'x': 0, 'y': 0}]
+        assert _scan_variable_assignments(texts) == {'x': -30.5}
+
+    def test_with_degree_symbol(self):
+        texts = [{'text': 'a = 90°', 'x': 0, 'y': 0}]
+        assert _scan_variable_assignments(texts) == {'a': 90.0}
+
+    def test_non_assignment_ignored(self):
+        texts = [
+            {'text': 'a=90', 'x': 0, 'y': 0},
+            {'text': 'just text', 'x': 0, 'y': 0},
+            {'text': '45°', 'x': 0, 'y': 0},
+        ]
+        assert _scan_variable_assignments(texts) == {'a': 90.0}
+
+    def test_multiple_assignments(self):
+        texts = [
+            {'text': 'a=90', 'x': 0, 'y': 0},
+            {'text': 'b = -45', 'x': 0, 'y': 0},
+        ]
+        result = _scan_variable_assignments(texts)
+        assert result == {'a': 90.0, 'b': -45.0}
 
 
 class TestFoldMarker:

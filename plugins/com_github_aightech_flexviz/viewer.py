@@ -415,7 +415,8 @@ class GLCanvas(glcanvas.GLCanvas):
 class FoldSlider(wx.Panel):
     """A labeled control for setting fold angle."""
 
-    def __init__(self, parent, fold_index: int, initial_angle: float, callback):
+    def __init__(self, parent, fold_index: int, initial_angle: float, callback,
+                 angle_label: str = ""):
         super().__init__(parent)
 
         self.fold_index = fold_index
@@ -448,6 +449,13 @@ class FoldSlider(wx.Panel):
 
         # Degree symbol
         sizer.Add(wx.StaticText(self, label="°"), 0, wx.ALIGN_CENTER_VERTICAL)
+
+        # Variable/formula label (shown when angle comes from an expression)
+        if angle_label:
+            var_label = wx.StaticText(self, label=f"({angle_label})")
+            var_label.SetForegroundColour(wx.Colour(100, 100, 180))
+            var_label.SetToolTip(f"Expression: {angle_label}")
+            sizer.Add(var_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 5)
 
         self.SetSizer(sizer)
 
@@ -554,7 +562,8 @@ class FlexViewerFrame(wx.Frame):
                 control_panel,
                 i,
                 marker.angle_degrees,
-                self.on_fold_angle_changed
+                self.on_fold_angle_changed,
+                angle_label=getattr(marker, 'angle_label', '')
             )
             self.fold_sliders.append(slider)
             fold_sizer.Add(slider, 0, wx.EXPAND | wx.ALL, 5)
@@ -1034,7 +1043,8 @@ class FlexViewerFrame(wx.Frame):
             for i, marker in enumerate(new_markers):
                 slider = FoldSlider(
                     self.fold_panel, i, marker.angle_degrees,
-                    self.on_fold_angle_changed
+                    self.on_fold_angle_changed,
+                    angle_label=getattr(marker, 'angle_label', '')
                 )
                 self.fold_sizer.Add(slider, 0, wx.EXPAND | wx.ALL, 2)
                 self.fold_sliders.append(slider)
@@ -1112,7 +1122,8 @@ class FlexViewerFrame(wx.Frame):
                 for i, marker in enumerate(new_markers):
                     slider = FoldSlider(
                         self.fold_panel, i, marker.angle_degrees,
-                        self.on_fold_angle_changed
+                        self.on_fold_angle_changed,
+                        angle_label=getattr(marker, 'angle_label', '')
                     )
                     self.fold_sizer.Add(slider, 0, wx.EXPAND | wx.ALL, 2)
                     self.fold_sliders.append(slider)
@@ -1199,6 +1210,32 @@ class FlexViewerFrame(wx.Frame):
         ) as dialog:
             if dialog.ShowModal() == wx.ID_OK:
                 path = dialog.GetPath()
+
+                # Show options dialog
+                include_models = False
+                include_wrl = False
+                opts = wx.Dialog(self, title="STEP Export Options", size=(320, 160))
+                sizer = wx.BoxSizer(wx.VERTICAL)
+                cb_models = wx.CheckBox(opts, label="Include 3D component models")
+                cb_wrl = wx.CheckBox(opts, label="Include WRL-only models (no STEP equivalent)")
+                cb_wrl.Enable(False)
+                cb_models.Bind(wx.EVT_CHECKBOX,
+                               lambda e: cb_wrl.Enable(cb_models.IsChecked()))
+                sizer.Add(cb_models, 0, wx.ALL, 10)
+                sizer.Add(cb_wrl, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+                btn_sizer = opts.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
+                sizer.Add(btn_sizer, 0, wx.EXPAND | wx.ALL, 10)
+                opts.SetSizer(sizer)
+                opts.Fit()
+                if opts.ShowModal() != wx.ID_OK:
+                    opts.Destroy()
+                    return
+                include_models = cb_models.IsChecked()
+                include_wrl = cb_wrl.IsChecked()
+                opts.Destroy()
+
+                pcb_dir = os.path.dirname(self.pcb_filepath) if self.pcb_filepath else None
+
                 wx.BeginBusyCursor()
                 try:
                     stiffeners = None
@@ -1212,6 +1249,9 @@ class FlexViewerFrame(wx.Frame):
                         config=getattr(self, 'config', None),
                         pcb=getattr(self, 'pcb', None),
                         stiffeners=stiffeners,
+                        pcb_dir=pcb_dir,
+                        include_models=include_models,
+                        include_wrl_models=include_wrl,
                     )
                     if success:
                         wx.MessageBox(f"Exported to:\n{path}", "Export Complete", wx.OK | wx.ICON_INFORMATION)

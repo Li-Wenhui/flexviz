@@ -74,6 +74,10 @@ class StepWriter:
         # Bodies: list of (brep_id, name)
         self._bodies = []
 
+        # Embedded sub-assemblies: list of (shape_rep_brep_ids, name, placement_axis_id)
+        # Each entry creates a child PRODUCT positioned via REPRESENTATION_RELATIONSHIP
+        self._sub_assemblies = []
+
     # -----------------------------------------------------------------
     # Entity ID management
     # -----------------------------------------------------------------
@@ -502,6 +506,31 @@ class StepWriter:
         shell_id = self.closed_shell(all_faces)
         return self.manifold_solid_brep(shell_id)
 
+    def build_flat_faces(self, outline_3d, holes_3d, normal, thickness):
+        """Like build_flat_solid but returns face IDs instead of a brep.
+
+        Used when merging multiple regions into a single shell.
+        """
+        n = _normalize(normal)
+        offset = _scale(n, -thickness)
+        bottom_outline = [_add(v, offset) for v in outline_3d]
+        bottom_holes = None
+        if holes_3d:
+            bottom_holes = [[_add(v, offset) for v in hole] for hole in holes_3d]
+        top_face_id = self.add_planar_face(outline_3d, n, holes_3d)
+        neg_n = _scale(n, -1.0)
+        bottom_reversed = list(reversed(bottom_outline))
+        bottom_holes_reversed = None
+        if bottom_holes:
+            bottom_holes_reversed = [list(reversed(h)) for h in bottom_holes]
+        bottom_face_id = self.add_planar_face(bottom_reversed, neg_n, bottom_holes_reversed)
+        side_face_ids = self._build_side_faces(outline_3d, bottom_outline, n)
+        if holes_3d and bottom_holes:
+            for hole_top, hole_bot in zip(holes_3d, bottom_holes):
+                hole_sides = self._build_side_faces(hole_bot, hole_top, neg_n)
+                side_face_ids.extend(hole_sides)
+        return [top_face_id, bottom_face_id] + side_face_ids
+
     def _build_side_faces(self, top_verts, bottom_verts, top_normal):
         """Build side faces connecting top and bottom polygon outlines."""
         n_verts = len(top_verts)
@@ -786,6 +815,76 @@ class StepWriter:
         shell_id = self.closed_shell(all_faces)
         return self.manifold_solid_brep(shell_id)
 
+    def build_flat_faces_mixed(self, top_edges_3d, normal, thickness, hole_data=None):
+        """Like build_flat_solid_mixed but returns face IDs instead of a brep."""
+        n = _normalize(normal)
+        offset = _scale(n, -thickness)
+        bottom_edges_3d = []
+        for e in top_edges_3d:
+            be = dict(e)
+            be['start'] = _add(e['start'], offset)
+            be['end'] = _add(e['end'], offset)
+            if e['type'] == 'arc' and e.get('center'):
+                be['center'] = _add(e['center'], offset)
+            bottom_edges_3d.append(be)
+        bottom_edges_reversed = []
+        for e in reversed(bottom_edges_3d):
+            re_e = dict(e)
+            re_e['start'] = e['end']
+            re_e['end'] = e['start']
+            if e['type'] == 'arc':
+                re_e['ccw'] = not e.get('ccw', True)
+            bottom_edges_reversed.append(re_e)
+        top_hole_loop_ids = []
+        bottom_hole_loop_ids = []
+        all_side_face_ids = []
+        if hole_data:
+            for hd in hole_data:
+                if hd[0] == 'circle':
+                    _, center_top, center_bot, radius = hd
+                    top_loop, bot_loop, cyl_sides = self._build_circle_hole_faces(
+                        center_top, center_bot, radius, n
+                    )
+                    top_hole_loop_ids.append(top_loop)
+                    bottom_hole_loop_ids.append(bot_loop)
+                    all_side_face_ids.extend(cyl_sides)
+                else:
+                    _, hole_top_edges = hd
+                    hole_bot_edges = []
+                    for e in hole_top_edges:
+                        be = dict(e)
+                        be['start'] = _add(e['start'], offset)
+                        be['end'] = _add(e['end'], offset)
+                        if e['type'] == 'arc' and e.get('center'):
+                            be['center'] = _add(e['center'], offset)
+                        hole_bot_edges.append(be)
+                    neg_n = _scale(n, -1.0)
+                    hole_sides = self._build_side_faces_mixed(
+                        hole_bot_edges, hole_top_edges, neg_n
+                    )
+                    all_side_face_ids.extend(hole_sides)
+                    top_hole_loop_id = self._make_mixed_loop(hole_top_edges)
+                    top_hole_loop_ids.append(top_hole_loop_id)
+                    hole_bot_reversed = []
+                    for e in reversed(hole_bot_edges):
+                        re_e = dict(e)
+                        re_e['start'] = e['end']
+                        re_e['end'] = e['start']
+                        hole_bot_reversed.append(re_e)
+                    bottom_hole_loop_id = self._make_mixed_loop(hole_bot_reversed)
+                    bottom_hole_loop_ids.append(bottom_hole_loop_id)
+        top_face_id = self.add_planar_face_mixed(
+            top_edges_3d, n, top_hole_loop_ids if top_hole_loop_ids else None
+        )
+        neg_n = _scale(n, -1.0)
+        bottom_face_id = self.add_planar_face_mixed(
+            bottom_edges_reversed, neg_n,
+            bottom_hole_loop_ids if bottom_hole_loop_ids else None
+        )
+        outer_side_ids = self._build_side_faces_mixed(top_edges_3d, bottom_edges_3d, n)
+        all_side_face_ids.extend(outer_side_ids)
+        return [top_face_id, bottom_face_id] + all_side_face_ids
+
     # -----------------------------------------------------------------
     # High-level: build a bend (cylindrical) solid
     # -----------------------------------------------------------------
@@ -794,6 +893,19 @@ class StepWriter:
                          cyl_ref, inner_radius, outer_radius, end_cap_pairs):
         """
         Build a curved solid for a bend zone with proper shared-edge topology.
+
+        Returns:
+            MANIFOLD_SOLID_BREP entity ID
+        """
+        face_ids = self._bend_faces(inner_corners, outer_corners, cyl_origin, cyl_axis,
+                                    cyl_ref, inner_radius, outer_radius, end_cap_pairs)
+        shell_id = self.closed_shell(face_ids)
+        return self.manifold_solid_brep(shell_id)
+
+    def _bend_faces(self, inner_corners, outer_corners, cyl_origin, cyl_axis,
+                    cyl_ref, inner_radius, outer_radius, end_cap_pairs):
+        """
+        Build faces for a bend zone. Returns list of face IDs.
 
         The solid has 6 faces sharing 12 edges:
           - Inner cylindrical face (radius R)
@@ -807,9 +919,6 @@ class StepWriter:
           axial_left      axial_right
             |                 |
             p0 ---arc_bot--- p1
-
-        Returns:
-            MANIFOLD_SOLID_BREP entity ID
         """
         ip0, ip1, ip2, ip3 = inner_corners
         op0, op1, op2, op3 = outer_corners
@@ -946,24 +1055,229 @@ class StepWriter:
         ts_bound = self.face_outer_bound(ts_loop, True)
         top_face = self.advanced_face([ts_bound], top_surf, True)
 
-        face_ids = [inner_face, outer_face, start_face, end_face, bot_face, top_face]
+        return [inner_face, outer_face, start_face, end_face, bot_face, top_face]
+
+    def build_bend_faces(self, inner_corners, outer_corners, cyl_origin, cyl_axis,
+                         cyl_ref, inner_radius, outer_radius, end_cap_pairs):
+        """Like build_bend_solid but returns face IDs instead of a brep."""
+        return self._bend_faces(inner_corners, outer_corners, cyl_origin, cyl_axis,
+                                cyl_ref, inner_radius, outer_radius, end_cap_pairs)
+
+    # -----------------------------------------------------------------
+    # High-level: build a tessellated solid from triangles
+    # -----------------------------------------------------------------
+
+    def build_tessellated_solid(self, vertices, faces):
+        """
+        Build a MANIFOLD_SOLID_BREP from a triangle mesh.
+
+        Args:
+            vertices: list of (x, y, z) tuples
+            faces: list of (i0, i1, i2) index tuples (triangles)
+
+        Returns:
+            MANIFOLD_SOLID_BREP entity ID
+        """
+        face_ids = []
+        for i0, i1, i2 in faces:
+            p0 = vertices[i0]
+            p1 = vertices[i1]
+            p2 = vertices[i2]
+
+            # Compute face normal
+            e1 = _sub(p1, p0)
+            e2 = _sub(p2, p0)
+            n = _cross(e1, e2)
+            ln = math.sqrt(n[0]**2 + n[1]**2 + n[2]**2)
+            if ln < 1e-15:
+                continue  # degenerate triangle
+            n = (n[0]/ln, n[1]/ln, n[2]/ln)
+
+            # Build vertices, edges, face
+            v0 = self.vertex_point(p0)
+            v1 = self.vertex_point(p1)
+            v2 = self.vertex_point(p2)
+
+            ec01, _ = self._get_or_create_line_edge(p0, p1)
+            ec12, _ = self._get_or_create_line_edge(p1, p2)
+            ec20, _ = self._get_or_create_line_edge(p2, p0)
+
+            oe0 = self.oriented_edge(ec01, True)
+            oe1 = self.oriented_edge(ec12, True)
+            oe2 = self.oriented_edge(ec20, True)
+
+            loop = self.edge_loop([oe0, oe1, oe2])
+            bound = self.face_outer_bound(loop, True)
+            surf = self.plane(p0, n)
+            face_id = self.advanced_face([bound], surf, True)
+            face_ids.append(face_id)
+
+        if not face_ids:
+            return None
+
         shell_id = self.closed_shell(face_ids)
         return self.manifold_solid_brep(shell_id)
+
+    # -----------------------------------------------------------------
+    # Embed entities from an external STEP file
+    # -----------------------------------------------------------------
+
+    def embed_step_file(self, step_path):
+        """
+        Parse a STEP file and embed its entities with renumbered IDs.
+
+        Finds all MANIFOLD_SOLID_BREP entities in the file and returns
+        their new IDs. Entity IDs are renumbered to avoid conflicts.
+
+        Args:
+            step_path: path to a .step/.stp file
+
+        Returns:
+            list of MANIFOLD_SOLID_BREP entity IDs in our numbering,
+            or None if parsing fails
+        """
+        import re
+
+        try:
+            with open(step_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+        except Exception:
+            return None
+
+        # Extract DATA section
+        data_match = re.search(r'\bDATA\s*;(.*?)\bENDSEC\s*;', content, re.DOTALL)
+        if not data_match:
+            return None
+
+        data_section = data_match.group(1)
+
+        # Parse entities: #id = ENTITY_TEXT ;
+        # Handle multi-line entities by joining everything first
+        entity_pattern = re.compile(r'#(\d+)\s*=\s*(.*?)\s*;', re.DOTALL)
+
+        old_entities = {}  # old_id -> entity_text
+        for m in entity_pattern.finditer(data_section):
+            old_id = int(m.group(1))
+            text = m.group(2).strip()
+            # Collapse internal whitespace
+            text = re.sub(r'\s+', ' ', text)
+            old_entities[old_id] = text
+
+        if not old_entities:
+            return None
+
+        # Filter out product/context/representation entities — we only want geometry
+        skip_prefixes = (
+            'APPLICATION_CONTEXT', 'APPLICATION_PROTOCOL',
+            'PRODUCT_CONTEXT', 'PRODUCT_DEFINITION', 'PRODUCT(',
+            'SHAPE_DEFINITION', 'SHAPE_REPRESENTATION',
+            'ADVANCED_BREP_SHAPE_REPRESENTATION',
+            'MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION',
+            'STYLED_ITEM', 'PRESENTATION_STYLE',
+            'SURFACE_STYLE', 'FILL_AREA_STYLE', 'COLOUR_RGB',
+            'CURVE_STYLE', 'DRAUGHTING',
+            'REPRESENTATION_CONTEXT', 'GLOBAL_UNCERTAINTY',
+            'GLOBAL_UNIT', 'LENGTH_UNIT', 'PLANE_ANGLE_UNIT',
+            'SOLID_ANGLE_UNIT', 'NAMED_UNIT', 'SI_UNIT',
+            'LENGTH_MEASURE', 'PLANE_ANGLE_MEASURE',
+            'SOLID_ANGLE_MEASURE', 'UNCERTAINTY_MEASURE',
+            'GEOMETRIC_REPRESENTATION_CONTEXT',
+            '( GEOMETRIC_REPRESENTATION_CONTEXT',
+            '(GEOMETRIC_REPRESENTATION_CONTEXT',
+            'PRODUCT_DEFINITION_FORMATION',
+            'OVER_RIDING_STYLED_ITEM',
+            'PRESENTATION_LAYER',
+            'REPRESENTATION_RELATIONSHIP',
+            'ITEM_DEFINED_TRANSFORMATION',
+            'CONTEXT_DEPENDENT_SHAPE_REPRESENTATION',
+        )
+
+        # Also skip compound entities that start with ( and contain context types
+        geom_entities = {}
+        for old_id, text in old_entities.items():
+            skip = False
+            # Check plain entity names
+            for prefix in skip_prefixes:
+                if text.startswith(prefix):
+                    skip = True
+                    break
+            # Check compound entities like (LENGTH_UNIT()...)
+            if not skip and text.startswith('('):
+                inner = text.upper()
+                if any(kw in inner for kw in [
+                    'LENGTH_UNIT', 'PLANE_ANGLE_UNIT', 'SOLID_ANGLE_UNIT',
+                    'NAMED_UNIT', 'SI_UNIT', 'REPRESENTATION_CONTEXT',
+                    'GLOBAL_UNCERTAINTY', 'GLOBAL_UNIT',
+                ]):
+                    skip = True
+            if not skip:
+                geom_entities[old_id] = text
+
+        if not geom_entities:
+            return None
+
+        # Build ID mapping: old_id -> new_id
+        id_map = {}
+        for old_id in sorted(geom_entities.keys()):
+            id_map[old_id] = self._next_id
+            self._next_id += 1
+
+        # Renumber references in entity text
+        def renumber_refs(text):
+            def replace_ref(m):
+                old_ref = int(m.group(1))
+                if old_ref in id_map:
+                    return f'#{id_map[old_ref]}'
+                # Reference to a skipped entity — should not happen for geometry
+                return m.group(0)
+            return re.sub(r'#(\d+)', replace_ref, text)
+
+        # Add renumbered entities
+        brep_ids = []
+        for old_id in sorted(geom_entities.keys()):
+            new_id = id_map[old_id]
+            new_text = renumber_refs(geom_entities[old_id])
+            self._entities.append((new_id, new_text))
+            if geom_entities[old_id].startswith('MANIFOLD_SOLID_BREP'):
+                brep_ids.append(new_id)
+
+        return brep_ids if brep_ids else None
 
     # -----------------------------------------------------------------
     # Body management
     # -----------------------------------------------------------------
 
     def add_body(self, brep_id, name="Body"):
-        """Register a named solid for output."""
+        """Register a named solid (MANIFOLD_SOLID_BREP) for output."""
         self._bodies.append((brep_id, name))
+
+    def add_sub_assembly(self, brep_ids, name, origin, z_axis, x_axis):
+        """Register a sub-assembly (component model) with a placement transform.
+
+        Args:
+            brep_ids: list of MANIFOLD_SOLID_BREP entity IDs
+            name: component reference name
+            origin: (x, y, z) position
+            z_axis: (dx, dy, dz) Z direction (normal)
+            x_axis: (dx, dy, dz) X direction (reference)
+        """
+        # Create the placement axis
+        axis_id = self.axis2_placement_3d(origin, z_axis, x_axis)
+        self._sub_assemblies.append((brep_ids, name, axis_id))
 
     # -----------------------------------------------------------------
     # STEP file output
     # -----------------------------------------------------------------
 
     def write(self, filename):
-        """Write complete STEP AP214 file."""
+        """Write complete STEP AP214 file.
+
+        Bodies with the same name are grouped into a single PRODUCT with one
+        SHAPE_REPRESENTATION containing all their MANIFOLD_SOLID_BREP entities.
+        Sub-assemblies (component models) use REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION
+        for positioning, allowing geometry reuse across identical components.
+        """
+        import re
         now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
         lines = []
@@ -979,13 +1293,14 @@ class StepWriter:
         for eid, text in self._entities:
             lines.append(f"#{eid}={text};")
 
-        # Write product structure for each body
+        # Group bodies by name — bodies with identical names share one PRODUCT
+        groups = {}  # name -> [brep_id, ...]
+        for brep_id, body_name in self._bodies:
+            groups.setdefault(body_name, []).append(brep_id)
+
+        # Write product structure
         next_id = self._next_id
 
-        # Collect all brep IDs for the shape representation
-        brep_refs = ",".join(f"#{bid}" for bid, _ in self._bodies)
-
-        # Allocate application context ID first so product chain can reference it directly
         app_ctx_id = next_id; next_id += 1
         app_proto = next_id; next_id += 1
 
@@ -1007,7 +1322,6 @@ class StepWriter:
         measure_angle = next_id; next_id += 1
         measure_solid = next_id; next_id += 1
         uncert = next_id; next_id += 1
-        shape_rep = next_id; next_id += 1
 
         lines.append(f"#{ctx_origin}=CARTESIAN_POINT('',(  0.,0.,0.));")
         lines.append(f"#{ctx_dir_z}=DIRECTION('',(  0.,0.,1.));")
@@ -1029,24 +1343,111 @@ class StepWriter:
         lines.append(f"#{uncert}=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-07),#{length_unit},"
                      f"'distance_accuracy_value','confusion accuracy');")
 
-        # Shape representation with all brep solids
-        lines.append(f"#{shape_rep}=ADVANCED_BREP_SHAPE_REPRESENTATION('',({brep_refs},#{ctx_axis}),#{geom_ctx});")
+        # Decide structure: assembly mode (with sub-assemblies) vs simple mode
+        has_sub_assemblies = len(self._sub_assemblies) > 0
 
-        # Product chain per body (references app_ctx_id directly)
-        for body_idx, (brep_id, body_name) in enumerate(self._bodies):
-            prod = next_id; next_id += 1
-            prod_ctx = next_id; next_id += 1
-            pdf = next_id; next_id += 1
-            pd = next_id; next_id += 1
-            pds = next_id; next_id += 1
-            sdr = next_id; next_id += 1
+        if has_sub_assemblies:
+            # Assembly mode: top-level SHAPE_REPRESENTATION contains only axis
+            # placements (no BREPs). All geometry (PCB, stiffeners, component
+            # models) is in child reps linked via REPRESENTATION_RELATIONSHIP.
 
-            lines.append(f"#{prod}=PRODUCT('{body_name}','{body_name}','',(#{prod_ctx}));")
-            lines.append(f"#{prod_ctx}=PRODUCT_CONTEXT('',#{app_ctx_id},'mechanical');")
-            lines.append(f"#{pdf}=PRODUCT_DEFINITION_FORMATION('','',#{prod});")
-            lines.append(f"#{pd}=PRODUCT_DEFINITION('design','',#{pdf},#{app_ctx_id});")
-            lines.append(f"#{pds}=PRODUCT_DEFINITION_SHAPE('','',#{pd});")
-            lines.append(f"#{sdr}=SHAPE_DEFINITION_REPRESENTATION(#{pds},#{shape_rep});")
+            # Create child SHAPE_REPRESENTATIONs for each unique component model
+            sub_model_reps = {}  # tuple(brep_ids) -> child_shape_rep_id
+            placement_entries = []
+
+            for brep_ids, name, placement_axis_id in self._sub_assemblies:
+                brep_key = tuple(brep_ids)
+                if brep_key not in sub_model_reps:
+                    child_rep = next_id; next_id += 1
+                    child_brep_refs = ",".join(f"#{bid}" for bid in brep_ids)
+                    lines.append(f"#{child_rep}=ADVANCED_BREP_SHAPE_REPRESENTATION('',"
+                                 f"({child_brep_refs},#{ctx_axis}),#{geom_ctx});")
+                    sub_model_reps[brep_key] = child_rep
+                placement_entries.append(
+                    (sub_model_reps[brep_key], placement_axis_id, name))
+
+            # Create child reps for PCB bodies (identity transform)
+            body_child_reps = []  # (child_rep_id, name)
+            for group_name, brep_ids in groups.items():
+                child_rep = next_id; next_id += 1
+                brep_refs = ",".join(f"#{bid}" for bid in brep_ids)
+                lines.append(f"#{child_rep}=ADVANCED_BREP_SHAPE_REPRESENTATION('{group_name}',"
+                             f"({brep_refs},#{ctx_axis}),#{geom_ctx});")
+                body_child_reps.append((child_rep, group_name))
+
+            # Top-level assembly: only axis placements, no BREPs
+            top_shape_rep = next_id; next_id += 1
+            lines.append(f"#{top_shape_rep}=SHAPE_REPRESENTATION('FlexPCB',"
+                         f"(#{ctx_axis}),#{geom_ctx});")
+
+            # Top-level product
+            top_prod = next_id; next_id += 1
+            top_prod_ctx = next_id; next_id += 1
+            top_pdf = next_id; next_id += 1
+            top_pd = next_id; next_id += 1
+            top_pds = next_id; next_id += 1
+            top_sdr = next_id; next_id += 1
+
+            lines.append(f"#{top_prod}=PRODUCT('FlexPCB','FlexPCB','',(#{top_prod_ctx}));")
+            lines.append(f"#{top_prod_ctx}=PRODUCT_CONTEXT('',#{app_ctx_id},'mechanical');")
+            lines.append(f"#{top_pdf}=PRODUCT_DEFINITION_FORMATION('','',#{top_prod});")
+            lines.append(f"#{top_pd}=PRODUCT_DEFINITION('design','',#{top_pdf},#{app_ctx_id});")
+            lines.append(f"#{top_pds}=PRODUCT_DEFINITION_SHAPE('','',#{top_pd});")
+            lines.append(f"#{top_sdr}=SHAPE_DEFINITION_REPRESENTATION(#{top_pds},#{top_shape_rep});")
+
+            # Link PCB bodies to top-level assembly (identity transform)
+            for child_rep_id, body_name in body_child_reps:
+                idt = next_id; next_id += 1
+                rr = next_id; next_id += 1
+                nauo = next_id; next_id += 1
+                cdsr = next_id; next_id += 1
+                pds2 = next_id; next_id += 1
+
+                lines.append(f"#{idt}=ITEM_DEFINED_TRANSFORMATION('','',#{ctx_axis},#{ctx_axis});")
+                lines.append(f"#{rr}=( REPRESENTATION_RELATIONSHIP('{body_name}','',#{child_rep_id},#{top_shape_rep})"
+                             f" REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#{idt})"
+                             f" SHAPE_REPRESENTATION_RELATIONSHIP() );")
+                lines.append(f"#{pds2}=PRODUCT_DEFINITION_SHAPE('Placement','Placement of {body_name}',#{nauo});")
+                lines.append(f"#{nauo}=NEXT_ASSEMBLY_USAGE_OCCURRENCE('{body_name}','','{body_name}',#{top_pd},$,$);")
+                lines.append(f"#{cdsr}=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#{rr},#{pds2});")
+
+            # Link component model instances to top-level assembly
+            for child_rep_id, placement_axis_id, comp_name in placement_entries:
+                idt = next_id; next_id += 1
+                rr = next_id; next_id += 1
+                nauo = next_id; next_id += 1
+                cdsr = next_id; next_id += 1
+                pds2 = next_id; next_id += 1
+
+                lines.append(f"#{idt}=ITEM_DEFINED_TRANSFORMATION('','',#{ctx_axis},#{placement_axis_id});")
+                lines.append(f"#{rr}=( REPRESENTATION_RELATIONSHIP('{comp_name}','',#{child_rep_id},#{top_shape_rep})"
+                             f" REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#{idt})"
+                             f" SHAPE_REPRESENTATION_RELATIONSHIP() );")
+                lines.append(f"#{pds2}=PRODUCT_DEFINITION_SHAPE('Placement','Placement of {comp_name}',#{nauo});")
+                lines.append(f"#{nauo}=NEXT_ASSEMBLY_USAGE_OCCURRENCE('{comp_name}','','{comp_name}',#{top_pd},$,$);")
+                lines.append(f"#{cdsr}=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#{rr},#{pds2});")
+
+        else:
+            # Simple mode: one PRODUCT per unique body name (original behavior)
+            for group_name, brep_ids in groups.items():
+                brep_refs = ",".join(f"#{bid}" for bid in brep_ids)
+                shape_rep = next_id; next_id += 1
+                prod = next_id; next_id += 1
+                prod_ctx = next_id; next_id += 1
+                pdf = next_id; next_id += 1
+                pd = next_id; next_id += 1
+                pds = next_id; next_id += 1
+                sdr = next_id; next_id += 1
+
+                lines.append(f"#{shape_rep}=ADVANCED_BREP_SHAPE_REPRESENTATION('{group_name}',"
+                             f"({brep_refs},#{ctx_axis}),#{geom_ctx});")
+                lines.append(f"#{prod}=PRODUCT('{group_name}','{group_name}','',(#{prod_ctx}));")
+                lines.append(f"#{prod_ctx}=PRODUCT_CONTEXT('',#{app_ctx_id},'mechanical');")
+                lines.append(f"#{pdf}=PRODUCT_DEFINITION_FORMATION('','',#{prod});")
+                lines.append(f"#{pd}=PRODUCT_DEFINITION('design','',#{pdf},#{app_ctx_id});")
+                lines.append(f"#{pds}=PRODUCT_DEFINITION_SHAPE('','',#{pd});")
+                lines.append(f"#{sdr}=SHAPE_DEFINITION_REPRESENTATION(#{pds},#{shape_rep});")
+
 
         lines.append("ENDSEC;")
         lines.append("END-ISO-10303-21;")

@@ -337,9 +337,9 @@ class TestBoardToStepIntegration:
             content = open(path).read()
             assert "ISO-10303-21;" in content
             assert "MANIFOLD_SOLID_BREP" in content
-            # With folds, we should have multiple bodies
-            brep_count = content.count("MANIFOLD_SOLID_BREP")
-            assert brep_count >= 2, f"Expected multiple regions, got {brep_count}"
+            # All PCB regions merge into 1 solid; verify many faces exist
+            face_count = content.count("ADVANCED_FACE")
+            assert face_count >= 10, f"Expected many faces from multiple regions, got {face_count}"
         finally:
             os.unlink(path)
 

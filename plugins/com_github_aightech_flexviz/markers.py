@@ -47,6 +47,9 @@ class FoldMarker:
     # Fold center position (midpoint between the two lines)
     center: tuple[float, float]
 
+    # Display label for variable/formula angles (empty = numeric literal)
+    angle_label: str = ""
+
     @property
     def angle_radians(self) -> float:
         return math.radians(self.angle_degrees)
@@ -140,33 +143,111 @@ def _point_between_lines(point: tuple[float, float], line1: GraphicLine, line2: 
     return abs(d1 + d2 - line_dist) < line_dist * 0.5
 
 
-def _parse_angle_from_text(text: str) -> Optional[float]:
+def _scan_variable_assignments(texts: list[dict]) -> dict[str, float]:
     """
-    Parse angle value from dimension text.
+    Scan text items for variable assignments like "a=90" or "bend_angle = 45".
 
-    Handles formats:
-    - "90"
-    - "90°"
-    - "+90°"
-    - "-45.5°"
-    - "90 deg"
+    Args:
+        texts: list of {'text': str, 'x': float, 'y': float}
+
+    Returns:
+        dict mapping variable name to float value
+    """
+    variables = {}
+    pattern = re.compile(r'^\s*([a-zA-Z_]\w*)\s*=\s*([+-]?\d+\.?\d*)\s*°?\s*$')
+    for item in texts:
+        m = pattern.match(item['text'])
+        if m:
+            variables[m.group(1)] = float(m.group(2))
+    return variables
+
+
+def _resolve_angle_expression(text: str, variables: dict[str, float]) -> tuple[Optional[float], str]:
+    """
+    Parse an angle expression that may contain variables or simple formulas.
+
+    Returns (resolved_value, display_label).
+    display_label is the original expression text (stripped of °/deg).
+    resolved_value is None if the expression cannot be evaluated.
+
+    Supported:
+      "90°"          → (90.0, "90")
+      "a"            → (value_of_a, "a")
+      "-a"           → (-value_of_a, "-a")
+      "a + 10"       → (value_of_a + 10, "a + 10")
+      "2*a - 5"      → (2*value_of_a - 5, "2*a - 5")
     """
     if not text:
-        return None
+        return None, ""
 
-    # Remove common suffixes and whitespace
-    text = text.strip()
-    text = text.replace('°', '').replace('deg', '').replace('DEG', '').strip()
+    # Strip angle suffixes
+    expr = text.strip().replace('°', '').replace('deg', '').replace('DEG', '').strip()
+    if not expr:
+        return None, ""
 
-    # Try to parse as float
-    match = re.match(r'^([+-]?\d+\.?\d*)$', text)
+    # Try pure numeric first
+    try:
+        val = float(expr)
+        return val, ""  # empty label = numeric literal
+    except ValueError:
+        pass
+
+    # Contains non-numeric chars → treat as expression
+    display_label = expr
+
+    # Safe evaluation: substitute variables, then evaluate with restricted ops
+    # Tokenize: only allow numbers, variable names, +, -, *, /, (, ), whitespace
+    if not re.match(r'^[a-zA-Z_\w\s\d\+\-\*\/\.\(\)]+$', expr):
+        return None, display_label
+
+    # Substitute variables (longest names first to avoid partial replacement)
+    eval_expr = expr
+    for name in sorted(variables.keys(), key=len, reverse=True):
+        eval_expr = re.sub(r'\b' + re.escape(name) + r'\b', str(variables[name]), eval_expr)
+
+    # Check if any unresolved variable names remain → default to 0
+    eval_expr = re.sub(r'\b([a-zA-Z_]\w*)\b', '0', eval_expr)
+
+    # Safe evaluation using compile + restricted eval
+    try:
+        # Only allow basic math operations
+        code = compile(eval_expr, '<angle>', 'eval')
+        # Verify no dangerous operations
+        for name in code.co_names:
+            return None, display_label  # has function calls or attributes
+        val = float(eval(code, {"__builtins__": {}}, {}))
+        return val, display_label
+    except Exception:
+        return None, display_label
+
+
+def _parse_angle_from_text(text: str, variables: dict[str, float] = None) -> tuple[Optional[float], str]:
+    """
+    Parse angle value from dimension text, with optional variable support.
+
+    Returns (angle_value, display_label).
+    display_label is non-empty when the text contains a variable or formula.
+
+    Handles formats:
+    - "90", "90°", "+90°", "-45.5°", "90 deg"  (numeric literals)
+    - "a", "-a", "a + 10", "2*a"                (variable expressions)
+    """
+    if variables is not None:
+        return _resolve_angle_expression(text, variables)
+
+    # Legacy path: numeric only
+    if not text:
+        return None, ""
+
+    text_clean = text.strip().replace('°', '').replace('deg', '').replace('DEG', '').strip()
+    match = re.match(r'^([+-]?\d+\.?\d*)$', text_clean)
     if match:
         try:
-            return float(match.group(1))
+            return float(match.group(1)), ""
         except ValueError:
             pass
 
-    return None
+    return None, ""
 
 
 def find_dotted_lines(pcb: KiCadPCB, layer: str = FOLD_MARKER_LAYER) -> list[GraphicLine]:
@@ -536,6 +617,13 @@ def detect_fold_markers(pcb: KiCadPCB, layer: str = FOLD_MARKER_LAYER) -> list[F
     if not dimensions:
         return []
 
+    # Scan for variable assignments on the marker layer
+    try:
+        layer_texts = pcb.get_layer_texts(layer)
+        variables = _scan_variable_assignments(layer_texts)
+    except Exception:
+        variables = {}
+
     # Track which lines have been used
     used_lines = set()
     markers = []
@@ -563,13 +651,15 @@ def detect_fold_markers(pcb: KiCadPCB, layer: str = FOLD_MARKER_LAYER) -> list[F
             if l is line_a or l is line_b:
                 used_lines.add(i)
 
-        # Parse angle from dimension
-        angle = _parse_angle_from_text(dim.text)
+        # Parse angle from dimension (with variable support)
+        angle, label = _parse_angle_from_text(dim.text, variables)
         if angle is None:
             angle = dim.value  # Fall back to parsed numeric value
+            label = ""
 
         if angle is not None:
             marker = create_fold_marker(line_a, line_b, angle)
+            marker.angle_label = label
             markers.append(marker)
 
     return markers

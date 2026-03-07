@@ -919,12 +919,62 @@ def create_board_mesh_with_regions(
     return mesh
 
 
+def _compute_fold_crossing_t_values(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    markers: list[FoldMarker],
+    num_bend_subdivisions: int = 1
+) -> list[float]:
+    """
+    Compute parametric t values where a line segment crosses fold zone boundaries
+    and internal bend subdivision lines.
+
+    For each fold marker, the zone spans perpendicular distance [-hw, +hw] from
+    the fold center. When num_bend_subdivisions > 1, internal subdivision
+    boundaries within the zone are also included so that trace quads align with
+    the board mesh facets (preventing traces from cutting through the surface).
+
+    Returns:
+        Sorted list of t values in (0, 1) where the line crosses boundaries.
+    """
+    crossings = []
+    for marker in markers:
+        hw = marker.zone_width / 2
+        perp = (-marker.axis[1], marker.axis[0])
+
+        # Perpendicular distance of start and end from fold center
+        ds = (start[0] - marker.center[0]) * perp[0] + (start[1] - marker.center[1]) * perp[1]
+        de = (end[0] - marker.center[0]) * perp[0] + (end[1] - marker.center[1]) * perp[1]
+
+        denom = de - ds
+        if abs(denom) < 1e-12:
+            continue
+
+        # Compute all subdivision boundaries within the bend zone
+        # With N subdivisions, there are N+1 boundaries from -hw to +hw
+        n_subs = max(1, num_bend_subdivisions)
+        for i in range(n_subs + 1):
+            boundary = -hw + (i / n_subs) * marker.zone_width
+            t = (boundary - ds) / denom
+            if 0.001 < t < 0.999:
+                crossings.append(t)
+
+    return sorted(crossings)
+
+
+def _dot3(a, b):
+    """Dot product of two 3D vectors."""
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
 def create_trace_mesh(
     segment: LineSegment,
     z_offset: float,
     regions: list[Region] = None,
     subdivisions: int = 20,
-    pcb_thickness: float = 0.0
+    pcb_thickness: float = 0.0,
+    markers: list[FoldMarker] = None,
+    num_bend_subdivisions: int = 1
 ) -> Mesh:
     """
     Create a 3D mesh for a copper trace.
@@ -935,6 +985,8 @@ def create_trace_mesh(
         regions: List of Region objects for region-based transformation
         subdivisions: Number of subdivisions along the trace
         pcb_thickness: PCB thickness for back layer trace positioning
+        markers: List of fold markers for adaptive subdivision at fold boundaries
+        num_bend_subdivisions: Number of strips per bend zone (must match board mesh)
 
     Returns:
         Mesh representing the trace
@@ -957,29 +1009,61 @@ def create_trace_mesh(
     # v0-v1 and v3-v2 are the long edges (along trace)
     # v0-v3 and v1-v2 are the short edges (across trace)
 
+    # Build t-values: uniform subdivisions + fold zone boundary crossings
+    t_values = [i / subdivisions for i in range(subdivisions + 1)]
+    if regions and markers:
+        # Use trace centerline for crossing detection
+        center_start = ((v0[0] + v3[0]) / 2, (v0[1] + v3[1]) / 2)
+        center_end = ((v1[0] + v2[0]) / 2, (v1[1] + v2[1]) / 2)
+        crossings = _compute_fold_crossing_t_values(center_start, center_end, markers, num_bend_subdivisions)
+        t_values.extend(crossings)
+        t_values = sorted(set(t_values))
+
     # Create subdivided points along both long edges
     edge1_points = []  # v0 to v1
     edge2_points = []  # v3 to v2
 
-    for i in range(subdivisions + 1):
-        t = i / subdivisions
+    last_valid_region_1 = None
+    last_valid_region_2 = None
+    last_n1 = None
+    last_n2 = None
+
+    for t in t_values:
         p1 = (v0[0] + t * (v1[0] - v0[0]), v0[1] + t * (v1[1] - v0[1]))
         p2 = (v3[0] + t * (v2[0] - v3[0]), v3[1] + t * (v2[1] - v3[1]))
 
-        # Find region for each point individually (handles traces crossing fold zones)
+        # Find region for each point with fallback to last valid region
         region_recipe_1 = []
         region_recipe_2 = []
         if regions:
             containing_region_1 = find_containing_region(p1, regions)
             if containing_region_1:
+                last_valid_region_1 = containing_region_1
+            elif last_valid_region_1:
+                containing_region_1 = last_valid_region_1
+            if containing_region_1:
                 region_recipe_1 = get_region_recipe(containing_region_1)
+
             containing_region_2 = find_containing_region(p2, regions)
+            if containing_region_2:
+                last_valid_region_2 = containing_region_2
+            elif last_valid_region_2:
+                containing_region_2 = last_valid_region_2
             if containing_region_2:
                 region_recipe_2 = get_region_recipe(containing_region_2)
 
         # Transform to 3D with normal for proper offset
         p1_3d, n1 = transform_point_and_normal(p1, region_recipe_1)
         p2_3d, n2 = transform_point_and_normal(p2, region_recipe_2)
+
+        # Normal consistency check: if normal flips relative to previous point,
+        # something went wrong at a region boundary — flip to match
+        if last_n1 and _dot3(n1, last_n1) < 0:
+            n1 = (-n1[0], -n1[1], -n1[2])
+        if last_n2 and _dot3(n2, last_n2) < 0:
+            n2 = (-n2[0], -n2[1], -n2[2])
+        last_n1 = n1
+        last_n2 = n2
 
         if is_back_layer:
             # Back layer: offset from bottom surface (negative normal direction)
@@ -1001,7 +1085,8 @@ def create_trace_mesh(
 
     # Create quads between the two edges
     # Reverse winding for back layer so normals face outward
-    for i in range(subdivisions):
+    num_quads = len(t_values) - 1
+    for i in range(num_quads):
         if is_back_layer:
             mesh.add_quad(
                 edge2_indices[i], edge2_indices[i + 1],
@@ -1044,24 +1129,21 @@ def create_pad_mesh(
     # Convert pad to polygon
     poly = pad_to_polygon(pad)
 
-    # Find which region the pad is in
-    # For annular pads with drill holes, the center may be in a cutout,
-    # so try the pad vertices if the center doesn't work
-    region_recipe = []
+    # Find a fallback region for the pad (used when per-vertex lookup fails)
+    fallback_region = None
 
     if regions:
         # First try the pad center
-        containing_region = find_containing_region(pad.center, regions)
+        fallback_region = find_containing_region(pad.center, regions)
 
         # If center is in a cutout (drill hole), try pad polygon vertices
-        if not containing_region and poly.vertices:
+        if not fallback_region and poly.vertices:
             for v in poly.vertices:
-                containing_region = find_containing_region((v[0], v[1]), regions)
-                if containing_region:
+                fallback_region = find_containing_region((v[0], v[1]), regions)
+                if fallback_region:
                     break
 
-        if containing_region:
-            region_recipe = get_region_recipe(containing_region)
+    fallback_recipe = get_region_recipe(fallback_region) if fallback_region else []
 
     # Determine if pad is on back layer
     is_back_layer = pad.layer == "B.Cu"
@@ -1088,30 +1170,34 @@ def create_pad_mesh(
             theta = 2 * math.pi * i / n_hole
             hole_2d.append((cx + r * math.cos(theta), cy + r * math.sin(theta)))
 
-    # Transform outer vertices to 3D
-    outer_3d = []
-    outer_indices = []
-    for v in outer_2d:
-        v3d, normal = transform_point_and_normal(v, region_recipe)
-        v3d_offset = (
+    def _transform_vertex(v):
+        """Transform a 2D vertex using per-vertex region lookup with fallback."""
+        recipe = fallback_recipe
+        if regions:
+            r = find_containing_region(v, regions)
+            if r:
+                recipe = get_region_recipe(r)
+        v3d, normal = transform_point_and_normal(v, recipe)
+        return (
             v3d[0] + normal[0] * total_offset,
             v3d[1] + normal[1] * total_offset,
             v3d[2] + normal[2] * total_offset
         )
+
+    # Transform outer vertices to 3D (per-vertex region lookup)
+    outer_3d = []
+    outer_indices = []
+    for v in outer_2d:
+        v3d_offset = _transform_vertex(v)
         outer_3d.append(v3d_offset)
         outer_indices.append(mesh.add_vertex(v3d_offset))
 
     if has_drill and hole_2d:
-        # Transform hole vertices to 3D
+        # Transform hole vertices to 3D (per-vertex region lookup)
         hole_3d = []
         hole_indices = []
         for v in hole_2d:
-            v3d, normal = transform_point_and_normal(v, region_recipe)
-            v3d_offset = (
-                v3d[0] + normal[0] * total_offset,
-                v3d[1] + normal[1] * total_offset,
-                v3d[2] + normal[2] * total_offset
-            )
+            v3d_offset = _transform_vertex(v)
             hole_3d.append(v3d_offset)
             hole_indices.append(mesh.add_vertex(v3d_offset))
 
@@ -1133,12 +1219,7 @@ def create_pad_mesh(
                     break
             if not found:
                 # Fallback: transform and add
-                v3d, normal = transform_point_and_normal(v2d, region_recipe)
-                v3d_offset = (
-                    v3d[0] + normal[0] * total_offset,
-                    v3d[1] + normal[1] * total_offset,
-                    v3d[2] + normal[2] * total_offset
-                )
+                v3d_offset = _transform_vertex(v2d)
                 merged_indices.append(mesh.add_vertex(v3d_offset))
 
         # Add triangles
@@ -1710,15 +1791,15 @@ def create_board_geometry_mesh(
 
     # Traces
     if include_traces:
-        z_offset = 0.01  # Slightly above board surface
+        z_offset = 0.05  # Above board surface (needs enough clearance to avoid z-fighting)
         for layer, traces in board.traces.items():
             for trace in traces:
-                trace_mesh = create_trace_mesh(trace, z_offset, active_regions, pcb_thickness=board.thickness)
+                trace_mesh = create_trace_mesh(trace, z_offset, active_regions, pcb_thickness=board.thickness, markers=markers, num_bend_subdivisions=num_bend_subdivisions)
                 mesh.merge(trace_mesh)
 
     # Pads
     if include_pads:
-        z_offset = 0.02  # Above traces
+        z_offset = 0.08  # Above traces
         for pad in board.all_pads:
             pad_mesh = create_pad_mesh(pad, z_offset, active_regions, board.thickness)
             mesh.merge(pad_mesh)

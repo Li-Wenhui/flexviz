@@ -494,7 +494,7 @@ class KiCadPCB:
             vertices.append(seg['start'])
             if seg['type'] == 'arc' and seg.get('mid'):
                 # Add intermediate points for arcs (linearized)
-                arc_verts = self._arc_to_vertices(seg, segments_per_90deg=8)
+                arc_verts = self._arc_to_vertices(seg, max_seg_length=2.0)
                 vertices.extend(arc_verts[1:-1])  # Skip start (already added) and end (added by next segment)
 
         return vertices, outline_segments
@@ -566,7 +566,8 @@ class KiCadPCB:
 
         return all_polygons
 
-    def _arc_to_vertices(self, arc_seg: dict, segments_per_90deg: int = 8) -> list[tuple[float, float]]:
+    def _arc_to_vertices(self, arc_seg: dict, segments_per_90deg: int = 8,
+                         max_seg_length: float = 0.0) -> list[tuple[float, float]]:
         """Convert an arc segment to linearized vertices."""
         import math
 
@@ -578,7 +579,8 @@ class KiCadPCB:
             return [start, end]
 
         # Use the existing linearize_arc logic
-        arc_segments = self._linearize_arc(start, mid, end, segments_per_90deg)
+        arc_segments = self._linearize_arc(start, mid, end, segments_per_90deg,
+                                           max_seg_length=max_seg_length)
 
         # Extract vertices from segments
         vertices = [start]
@@ -592,7 +594,8 @@ class KiCadPCB:
         start: tuple[float, float],
         mid: tuple[float, float],
         end: tuple[float, float],
-        segments_per_90deg: int = 8
+        segments_per_90deg: int = 8,
+        max_seg_length: float = 0.0
     ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
         """
         Linearize an arc defined by 3 points into line segments.
@@ -602,6 +605,9 @@ class KiCadPCB:
             mid: Middle point of arc (on the arc)
             end: End point of arc
             segments_per_90deg: Number of segments per 90 degrees of arc
+                (used only when max_seg_length is 0)
+            max_seg_length: If > 0, use adaptive tessellation based on arc
+                length instead of fixed segments_per_90deg.
 
         Returns:
             List of line segments [(p1, p2), ...]
@@ -669,7 +675,11 @@ class KiCadPCB:
             direction = -1
 
         # Calculate number of segments
-        num_segments = max(2, int(total_angle / (math.pi / 2) * segments_per_90deg))
+        if max_seg_length > 0:
+            arc_length = radius * total_angle
+            num_segments = max(2, int(math.ceil(arc_length / max_seg_length)))
+        else:
+            num_segments = max(2, int(total_angle / (math.pi / 2) * segments_per_90deg))
 
         # Generate points along arc
         segments = []
@@ -780,7 +790,8 @@ class KiCadPCB:
                     arc_segments = self._linearize_arc(
                         (start.get_float(0), start.get_float(1)),
                         (mid.get_float(0), mid.get_float(1)) if mid else None,
-                        (end.get_float(0), end.get_float(1))
+                        (end.get_float(0), end.get_float(1)),
+                        max_seg_length=2.0
                     )
                     segments.extend(arc_segments)
 
@@ -1208,6 +1219,33 @@ class KiCadPCB:
         info = self.get_board_info()
         return info.layers
 
+    def get_layer_texts(self, layer: str) -> list[dict]:
+        """
+        Get all gr_text items on a specific layer.
+
+        Returns list of dicts: [{'text': str, 'x': float, 'y': float}, ...]
+        """
+        results = []
+        for text_elem in self.root.find_all('gr_text'):
+            layer_expr = text_elem['layer']
+            if not layer_expr or layer_expr.get_string(0) != layer:
+                continue
+            text = text_elem.get_string(0)
+            at = text_elem['at']
+            x = at.get_float(0) if at else 0.0
+            y = at.get_float(1) if at else 0.0
+            results.append({'text': text, 'x': x, 'y': y})
+
+        # Also scan dimension text values on this layer
+        for dim in self.get_dimensions(layer=layer):
+            if dim.text:
+                results.append({
+                    'text': dim.text,
+                    'x': (dim.start_x + dim.end_x) / 2,
+                    'y': (dim.start_y + dim.end_y) / 2,
+                })
+        return results
+
     def get_user_layers(self) -> list[str]:
         """
         Get list of User layers (User.1, User.2, etc.).
@@ -1281,8 +1319,9 @@ class KiCadPCB:
                 radius = math.sqrt((ex - cx) ** 2 + (ey - cy) ** 2)
 
                 if radius > 0:
-                    # Convert circle to polygon with 32 segments
-                    num_segments = 32
+                    # Adaptive: ~2mm max chord length, minimum 8 segments
+                    circumference = 2 * math.pi * radius
+                    num_segments = max(8, int(math.ceil(circumference / 2.0)))
                     vertices = []
                     for i in range(num_segments):
                         angle = 2 * math.pi * i / num_segments
