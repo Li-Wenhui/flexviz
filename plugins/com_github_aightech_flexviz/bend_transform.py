@@ -223,11 +223,19 @@ def transform_point(
             # then rotate the excess distance beyond the zone.
             # This ensures continuity with IN_ZONE at the boundary.
 
-            # For back entry, use -angle for rotation direction
-            # (point is geometrically BEFORE fold, on the un-rotated side)
-            rotation_angle = -effective_angle+math.pi   if entered_from_back else effective_angle
-            cos_a = math.cos(rotation_angle)
-            sin_a = math.sin(rotation_angle)
+            # Tangent angle: direction the flat plane continues at the arc end.
+            # For back entry, the tangent at the far boundary is π - angle
+            # (matches derivative of IN_ZONE cylindrical mapping at full arc).
+            # Cumulative angle: physical surface rotation for subsequent folds.
+            # For back entry, the surface rotates by -angle (consistent with normals).
+            if entered_from_back:
+                tangent_angle = -effective_angle + math.pi
+                cumulative_angle = -effective_angle
+            else:
+                tangent_angle = effective_angle
+                cumulative_angle = effective_angle
+            cos_a = math.cos(tangent_angle)
+            sin_a = math.sin(tangent_angle)
 
             # Position at end of IN_ZONE (perp_dist = hw)
             zone_end_perp = R * math.sin(abs(effective_angle)) - hw
@@ -254,9 +262,8 @@ def transform_point(
             )
 
             # Update cumulative affine transformation for subsequent folds
-            # New rotation: fold_rot @ rot
-            # For back entry, use -angle (consistent with compute_normal)
-            fold_rot = _rotation_matrix_around_axis(fold_axis_3d, rotation_angle)
+            # Use cumulative_angle (not tangent_angle) for the rotation matrix
+            fold_rot = _rotation_matrix_around_axis(fold_axis_3d, cumulative_angle)
             new_rot = _multiply_matrices(fold_rot, rot)
 
             # New origin: The cylindrical offset means fold center also moves.
