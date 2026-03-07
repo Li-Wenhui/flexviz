@@ -17,7 +17,11 @@
 - [x] Trace placement bug fixes (boundary fallback, adaptive subdivision, normal consistency)
 - [x] Pad rendering fixes (per-vertex region lookup for pads crossing folds)
 - [x] Z-fighting fix (increased z_offset: traces 0.05mm, pads 0.08mm)
-- [x] 20 unit tests + 8-scene visual validation
+- [x] Bend subdivision alignment: trace t-values match board mesh facets via `num_bend_subdivisions`
+- [x] Back-entry AFTER rotation fix: separated tangent angle (π−angle) from cumulative angle (−angle)
+  in `bend_transform.py`, fixing -90° fold discontinuities in multi-fold configurations
+- [x] 33 unit tests + 10-scene visual validation (h_shape PCB with 8 mixed-angle folds)
+- [x] All 253 tests passing
 
 ### Not Started
 - [ ] Phase 2: Separate mesh layers (viewer performance)
@@ -39,17 +43,16 @@ checkbox. For a complex board (44 folds, 115 arcs), each toggle takes seconds.
 **Root cause:** Single monolithic `Mesh` object compiled into one OpenGL display list.
 No concept of layers or cached sub-meshes.
 
-### Issue 2: Trace/pad drawing bugs
-**Severity: HIGH** | **Impact: Visual correctness**
+### ~~Issue 2: Trace/pad drawing bugs~~ RESOLVED
+**Status: FIXED** in Phase 1
 
-Three sub-issues:
-1. **Boundary region lookup failure** — When a trace subdivision point falls exactly on a
-   fold zone boundary, `find_containing_region()` returns `None`. The point gets an empty
-   recipe (stays flat) while neighbors fold → visible discontinuity.
-2. **Traces crossing narrow fold zones** — Fixed 20 subdivisions may skip a narrow fold
-   zone entirely, causing the trace to "jump" from one side to the other.
-3. **Pads use single region for all vertices** — A pad straddling a fold boundary uses
-   one region's recipe for all vertices → the pad doesn't follow the bend.
+All three sub-issues resolved:
+1. ~~Boundary region lookup failure~~ → fallback to last valid region
+2. ~~Traces crossing narrow fold zones~~ → adaptive subdivision at fold boundaries
+3. ~~Pads use single region~~ → per-vertex region lookup
+4. **Additional fix:** Back-entry AFTER rotation used wrong cumulative angle (π−angle
+   instead of −angle), causing 12mm+ discontinuities for -90° folds in multi-fold boards.
+   Fixed by separating tangent angle from cumulative rotation angle in `bend_transform.py`.
 
 ### Issue 3: STEP export missing electronics
 **Severity: MEDIUM** | **Impact: Export quality**
@@ -120,9 +123,11 @@ if last_normal and dot(n, last_normal) < 0:
 - [x] Test: single fold + trace crossing it → trace follows the bend smoothly
 - [x] Test: two folds + trace crossing both → no jumps or discontinuities
 - [x] Test: pad straddling a fold boundary → pad wraps around the bend
-- [x] Visual: 8 scenes saved to `tests/visual/phase1_traces/` (diagonal, multi-fold, pads, front/back layers, dense, accordion, transparent, real PCB)
+- [x] Visual: 10 scenes saved to `tests/visual/phase1_traces/` (includes h_shape PCB with 8 mixed-angle folds)
 - [x] Z-fighting fix: traces 0.05mm, pads 0.08mm above surface
-- [x] 240 tests pass (20 new + 220 existing)
+- [x] Bend subdivision alignment: trace quads match board mesh facets
+- [x] Back-entry -90° fold continuity: all 8 folds pass max_jump < 0.15mm
+- [x] 253 tests pass (33 new + 220 existing)
 
 ---
 
