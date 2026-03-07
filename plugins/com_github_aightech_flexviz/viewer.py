@@ -7,6 +7,7 @@ Requires PyOpenGL to be installed in KiCad's Python environment.
 
 import os
 import sys
+import threading
 import wx
 import wx.glcanvas as glcanvas
 
@@ -72,7 +73,10 @@ def check_opengl_available():
     return True
 
 try:
-    from .mesh import Mesh, create_board_geometry_mesh, create_board_layer_meshes
+    from .mesh import (Mesh, create_board_geometry_mesh, create_board_layer_meshes,
+                        compute_regions, build_board_layer, build_traces_layer,
+                        build_pads_layer, build_components_layer, build_3d_models_layer,
+                        build_stiffeners_layer)
     from .bend_transform import FoldDefinition, create_fold_definitions
     from .geometry import BoardGeometry, extract_geometry
     from .markers import FoldMarker, detect_fold_markers
@@ -81,7 +85,10 @@ try:
     from .stiffener import extract_stiffeners
     from .validation import validate_design, get_fold_radius_status, ValidationResult
 except ImportError:
-    from mesh import Mesh, create_board_geometry_mesh, create_board_layer_meshes
+    from mesh import (Mesh, create_board_geometry_mesh, create_board_layer_meshes,
+                       compute_regions, build_board_layer, build_traces_layer,
+                       build_pads_layer, build_components_layer, build_3d_models_layer,
+                       build_stiffeners_layer)
     from bend_transform import FoldDefinition, create_fold_definitions
     from geometry import BoardGeometry, extract_geometry
     from markers import FoldMarker, detect_fold_markers
@@ -225,6 +232,25 @@ class GLCanvas(glcanvas.GLCanvas):
             if name in layer_meshes and layer_meshes[name].vertices:
                 self._auto_center_camera(layer_meshes[name].vertices)
                 break
+
+        self.Refresh()
+
+    def set_single_layer(self, name: str, mesh: Mesh, visible: bool = True):
+        """Set or replace a single layer's mesh (called from background thread delivery)."""
+        # Delete old display list for this layer
+        old = self._layers.get(name)
+        if old and old.get('display_list') is not None:
+            glDeleteLists(old['display_list'], 1)
+
+        self._layers[name] = {
+            'mesh': mesh,
+            'display_list': None,
+            'visible': visible,
+        }
+
+        # Auto-center camera on board layer
+        if name == 'board' and mesh and mesh.vertices:
+            self._auto_center_camera(mesh.vertices)
 
         self.Refresh()
 
@@ -887,7 +913,12 @@ class FlexViewerFrame(wx.Frame):
         splitter.SetMinimumPaneSize(350)
 
     def update_mesh(self):
-        """Regenerate all layer meshes with current fold angles."""
+        """Regenerate all layer meshes with current fold angles.
+
+        Computes regions synchronously, then builds each layer in a
+        background thread so the GUI stays responsive.  Each layer is
+        delivered to the canvas as soon as it is ready.
+        """
         if self.board_geometry is None:
             return
 
@@ -908,17 +939,11 @@ class FlexViewerFrame(wx.Frame):
         # Determine PCB directory for 3D model path resolution
         pcb_dir = os.path.dirname(self.pcb_filepath) if self.pcb_filepath else None
 
-        # Generate all layer meshes at once (shares region computation)
-        layer_meshes = create_board_layer_meshes(
-            self.board_geometry,
-            markers=self.fold_markers,
-            num_bend_subdivisions=self.config.bend_subdivisions if hasattr(self, 'config') else 1,
-            stiffeners=stiffeners,
-            debug_regions=self.cb_debug_regions.GetValue() if hasattr(self, 'cb_debug_regions') else False,
-            apply_bend=bend_enabled,
-            pcb_dir=pcb_dir,
-            pcb=self.pcb
-        )
+        # Bump generation counter so stale results are discarded
+        if not hasattr(self, '_mesh_generation'):
+            self._mesh_generation = 0
+        self._mesh_generation += 1
+        generation = self._mesh_generation
 
         # Determine visibility from checkboxes
         show_3d = self.cb_3d_models.GetValue() if hasattr(self, 'cb_3d_models') else False
@@ -932,9 +957,60 @@ class FlexViewerFrame(wx.Frame):
             'stiffeners': self.cb_stiffeners.GetValue() if hasattr(self, 'cb_stiffeners') else True,
         }
 
-        self.canvas.set_layer_meshes(layer_meshes, visibility)
+        # Compute regions synchronously (fast, needed by all layers)
+        num_subs = self.config.bend_subdivisions if hasattr(self, 'config') else 1
+        debug_reg = self.cb_debug_regions.GetValue() if hasattr(self, 'cb_debug_regions') else False
+        regions, active_regions = compute_regions(
+            self.board_geometry, self.fold_markers, num_subs, bend_enabled
+        )
 
-        # Run validation
+        # Reset canvas layers for the new generation
+        self.canvas.set_layer_meshes({}, visibility)
+
+        # Snapshot values that threads will read (all immutable or thread-safe)
+        board = self.board_geometry
+        markers = list(self.fold_markers)
+        pcb = self.pcb
+
+        def deliver(layer_name, mesh, gen):
+            """Called via wx.CallAfter from worker thread."""
+            if gen != self._mesh_generation:
+                return  # stale result
+            self.canvas.set_single_layer(layer_name, mesh, visibility.get(layer_name, False))
+
+        def build_and_deliver(layer_name, build_fn, gen):
+            """Run build_fn in a thread and deliver result."""
+            try:
+                mesh = build_fn()
+            except Exception as e:
+                print(f"Warning: failed to build {layer_name}: {e}")
+                mesh = Mesh()
+            wx.CallAfter(deliver, layer_name, mesh, gen)
+
+        # Define build tasks
+        tasks = {
+            'board': lambda: build_board_layer(
+                board, markers, 1.0, num_subs, debug_reg, bend_enabled),
+            'traces': lambda: build_traces_layer(
+                board, active_regions, markers, num_subs),
+            'pads': lambda: build_pads_layer(board, active_regions),
+            'components': lambda: build_components_layer(board, active_regions),
+            '3d_models': lambda: build_3d_models_layer(
+                board, active_regions, pcb_dir, pcb),
+            'stiffeners': lambda: build_stiffeners_layer(
+                board, regions, stiffeners, bend_enabled),
+        }
+
+        # Launch each layer build in a background thread
+        for layer_name, build_fn in tasks.items():
+            t = threading.Thread(
+                target=build_and_deliver,
+                args=(layer_name, build_fn, generation),
+                daemon=True
+            )
+            t.start()
+
+        # Run validation (uses current state, doesn't need mesh results)
         self.run_validation(stiffeners)
 
     def _update_stiffener_status(self):
