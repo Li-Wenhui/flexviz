@@ -636,9 +636,11 @@ class FlexViewerFrame(wx.Frame):
             self.available_layers = ["User.1", "User.2", "User.3", "User.4"]
 
         self.init_ui()
-        self.update_mesh()
-
         self.Centre()
+
+        # Defer initial mesh build until after the frame is shown,
+        # so the GUI appears immediately and layers load progressively.
+        wx.CallAfter(self.update_mesh)
 
     def init_ui(self):
         """Initialize the UI."""
