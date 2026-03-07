@@ -23,8 +23,26 @@
 - [x] 33 unit tests + 10-scene visual validation (h_shape PCB with 8 mixed-angle folds)
 - [x] All 253 tests passing
 
+### Completed (Phase 1.2)
+- [x] Oval drill parsing: `(drill oval X Y)` now correctly parsed (was returning 0)
+- [x] `*.Cu` wildcard layer expansion for through-hole pads
+- [x] Improved region fallback for through-hole components (drill hole avoidance via
+  offset probes, pad position fallback for 3D model and box mesh placement)
+- [x] Per-vertex region lookup for component boxes and 3D models
+- [x] Component bounding box rotation: bbox now applies footprint angle when computing
+  pad positions, fixing displaced component boxes for rotated through-hole footprints
+- [x] 7 new through-hole-specific tests
+- [x] All 260 tests passing
+
+### Completed (Phase 2)
+- [x] Separate mesh layers: each display layer (board, traces, pads, components, 3D models, stiffeners) gets its own mesh and OpenGL display list
+- [x] `create_board_layer_meshes()` in mesh.py generates all layers at once, sharing region computation
+- [x] Toggling checkboxes (Show Traces, Show Pads, etc.) is now instant visibility toggle — no mesh rebuild
+- [x] Lazy display list compilation: OpenGL display lists built on first visibility enable
+- [x] OBJ/STL export merges visible layers on demand via `get_visible_mesh()`
+- [x] 6 new tests, all 266 tests passing
+
 ### Not Started
-- [ ] Phase 2: Separate mesh layers (viewer performance)
 - [ ] Phase 3: Region lookup acceleration (spatial index)
 - [ ] Phase 4: STEP export electronics (traces/pads as copper geometry)
 - [ ] Phase 5: Export button UI consolidation
@@ -33,15 +51,12 @@
 
 ## Current Issues
 
-### Issue 1: Slow GUI — Full mesh rebuild on every toggle
-**Severity: HIGH** | **Impact: Every user interaction**
+### ~~Issue 1: Slow GUI — Full mesh rebuild on every toggle~~ RESOLVED
+**Status: FIXED** in Phase 2
 
-`on_display_option_changed()` → `update_mesh()` → `create_board_geometry_mesh()` rebuilds
-ALL geometry (board + traces + pads + stiffeners + components) even when toggling a single
-checkbox. For a complex board (44 folds, 115 arcs), each toggle takes seconds.
-
-**Root cause:** Single monolithic `Mesh` object compiled into one OpenGL display list.
-No concept of layers or cached sub-meshes.
+Toggling display checkboxes now only changes OpenGL layer visibility — no mesh rebuild.
+All layers are pre-built during `update_mesh()` (fold angle changes, refresh, settings).
+Display lists are lazily compiled on first visibility enable.
 
 ### ~~Issue 2: Trace/pad drawing bugs~~ RESOLVED
 **Status: FIXED** in Phase 1
@@ -128,6 +143,57 @@ if last_normal and dot(n, last_normal) < 0:
 - [x] Bend subdivision alignment: trace quads match board mesh facets
 - [x] Back-entry -90° fold continuity: all 8 folds pass max_jump < 0.15mm
 - [x] 253 tests pass (33 new + 220 existing)
+
+---
+
+### Phase 1.2: Through-hole part display fixes
+**Goal:** Through-hole pads and 3D models render at correct positions.
+
+#### Bugs fixed
+
+**1A: Oval drill parsing** (`kicad_parser.py` line 1134)
+`(drill oval 0.8 1.7)` was parsed as `drill=0` because `get_float(0)` tried to parse
+the string `"oval"`. Fixed to detect `"oval"` keyword and use `max(dim1, dim2)`.
+
+**1B: `*.Cu` wildcard layer expansion** (`geometry.py` line 322)
+Through-hole pads have `layers=["*.Cu", "*.Mask"]`. The layer check only matched exact
+`"F.Cu"` / `"B.Cu"`. Added `*.Cu` wildcard expansion so through-hole pads are correctly
+assigned to F.Cu or B.Cu.
+
+**1C: Component center in drill hole** (`mesh.py`)
+For through-hole components where a pad is at (0,0) relative to footprint, the component
+center falls in a drill hole cutout → region lookup returns None. Improved fallback:
+1. Try small offsets (0.5mm) around center to escape drill hole
+2. Try bounding box corners
+3. Try pad positions and pad polygon vertices
+Applied to both `create_component_mesh` and `create_component_3d_model_mesh`.
+
+**1D: Pad center in drill hole** (`mesh.py` `create_pad_mesh`)
+Same drill hole escape: try offsets around pad center based on drill radius before
+falling back to polygon vertex iteration.
+
+**1E: Component per-vertex region lookup** (`mesh.py`)
+`create_component_mesh` and `create_component_3d_model_mesh` used a SINGLE region
+recipe for ALL vertices, causing components spanning fold boundaries to be misplaced.
+Fixed by adding per-vertex region lookup: each vertex finds its own region and uses
+that region's fold recipe. Falls back to the component center's region recipe when
+no region found. This matches the approach already used in `create_pad_mesh`.
+
+**1F: Component bounding box not rotated** (`geometry.py` line 293)
+`pad_xs = [fp.at_x + p.at_x ...]` computed pad positions WITHOUT applying footprint
+rotation angle, causing component bounding boxes for rotated footprints (90°, -90°)
+to be at completely wrong positions. All pads fell outside the bbox for the audio jack
+(-90°) and 2/6 pads were outside for the USB connector (90°). Fixed by applying the
+same rotation transform used for pad center computation.
+
+**Validation checkpoint:**
+- [x] Oval drill pads now have correct drill diameter (h_shape: 1.7mm, neubondV4: 1.7mm)
+- [x] Through-hole pads on F.Cu footprints correctly assigned F.Cu layer
+- [x] Pad center in drill hole → fallback finds correct region
+- [x] 3D pad-to-trace distance preserved after bend transform
+- [x] Component boxes follow fold surface via per-vertex region lookup
+- [x] Rotated component bboxes contain all pad positions
+- [x] 260 tests pass (7 new)
 
 ---
 

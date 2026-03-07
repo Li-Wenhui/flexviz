@@ -72,7 +72,7 @@ def check_opengl_available():
     return True
 
 try:
-    from .mesh import Mesh, create_board_geometry_mesh
+    from .mesh import Mesh, create_board_geometry_mesh, create_board_layer_meshes
     from .bend_transform import FoldDefinition, create_fold_definitions
     from .geometry import BoardGeometry, extract_geometry
     from .markers import FoldMarker, detect_fold_markers
@@ -81,7 +81,7 @@ try:
     from .stiffener import extract_stiffeners
     from .validation import validate_design, get_fold_radius_status, ValidationResult
 except ImportError:
-    from mesh import Mesh, create_board_geometry_mesh
+    from mesh import Mesh, create_board_geometry_mesh, create_board_layer_meshes
     from bend_transform import FoldDefinition, create_fold_definitions
     from geometry import BoardGeometry, extract_geometry
     from markers import FoldMarker, detect_fold_markers
@@ -122,7 +122,11 @@ class GLCanvas(glcanvas.GLCanvas):
         self.last_mouse_pos = None
         self.mouse_mode = None  # 'rotate', 'pan', 'zoom'
 
-        # Mesh data
+        # Mesh layers: each has mesh, display_list, visible flag
+        self._layers = {}
+        self._layer_order = ['board', 'traces', 'pads', 'components', '3d_models', 'stiffeners']
+
+        # Legacy single-mesh support (for set_mesh compatibility)
         self.mesh = None
         self.display_list = None
 
@@ -173,8 +177,9 @@ class GLCanvas(glcanvas.GLCanvas):
         self.initialized = True
 
     def set_mesh(self, mesh: Mesh):
-        """Set the mesh to display."""
+        """Set a single mesh to display (legacy interface)."""
         self.mesh = mesh
+        self._layers = {}
 
         # Delete old display list
         if self.display_list is not None:
@@ -183,47 +188,99 @@ class GLCanvas(glcanvas.GLCanvas):
 
         # Auto-center camera on mesh
         if mesh and mesh.vertices:
-            xs = [v[0] for v in mesh.vertices]
-            ys = [v[1] for v in mesh.vertices]
-            zs = [v[2] for v in mesh.vertices]
-
-            self.camera_target = [
-                (min(xs) + max(xs)) / 2,
-                (min(ys) + max(ys)) / 2,
-                (min(zs) + max(zs)) / 2
-            ]
-
-            # Set camera distance based on mesh size
-            size = max(max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs))
-            self.camera_distance = size * 2
+            self._auto_center_camera(mesh.vertices)
 
         self.Refresh()
 
-    def build_display_list(self):
-        """Build OpenGL display list for the mesh."""
-        if self.mesh is None:
-            return
+    def set_layer_meshes(self, layer_meshes: dict, visibility: dict = None):
+        """Set separate meshes for each display layer.
 
-        self.display_list = glGenLists(1)
-        glNewList(self.display_list, GL_COMPILE)
+        Args:
+            layer_meshes: Dict of layer_name -> Mesh
+            visibility: Dict of layer_name -> bool (initial visibility)
+        """
+        # Clear legacy single mesh
+        self.mesh = None
+        if self.display_list is not None:
+            glDeleteLists(self.display_list, 1)
+            self.display_list = None
+
+        # Delete old layer display lists
+        for layer in self._layers.values():
+            if layer.get('display_list') is not None:
+                glDeleteLists(layer['display_list'], 1)
+
+        # Build new layers
+        self._layers = {}
+        for name, mesh in layer_meshes.items():
+            visible = visibility.get(name, True) if visibility else True
+            self._layers[name] = {
+                'mesh': mesh,
+                'display_list': None,
+                'visible': visible,
+            }
+
+        # Auto-center on board layer (or first non-empty layer)
+        for name in ['board'] + list(layer_meshes.keys()):
+            if name in layer_meshes and layer_meshes[name].vertices:
+                self._auto_center_camera(layer_meshes[name].vertices)
+                break
+
+        self.Refresh()
+
+    def set_layer_visible(self, name: str, visible: bool):
+        """Toggle visibility of a layer without rebuilding."""
+        if name in self._layers:
+            self._layers[name]['visible'] = visible
+            self.Refresh()
+
+    def get_visible_mesh(self):
+        """Merge all visible layer meshes into one (for export)."""
+        if self.mesh is not None:
+            return self.mesh
+        if not self._layers:
+            return None
+        merged = Mesh()
+        for name in self._layer_order:
+            layer = self._layers.get(name)
+            if layer and layer['visible'] and layer['mesh'] and layer['mesh'].vertices:
+                merged.merge(layer['mesh'])
+        return merged if merged.vertices else None
+
+    def _auto_center_camera(self, vertices):
+        """Center camera on a set of vertices."""
+        xs = [v[0] for v in vertices]
+        ys = [v[1] for v in vertices]
+        zs = [v[2] for v in vertices]
+
+        self.camera_target = [
+            (min(xs) + max(xs)) / 2,
+            (min(ys) + max(ys)) / 2,
+            (min(zs) + max(zs)) / 2
+        ]
+
+        size = max(max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs))
+        self.camera_distance = size * 2
+
+    def _compile_mesh_display_list(self, mesh: Mesh) -> int:
+        """Compile a mesh into an OpenGL display list. Returns list ID."""
+        dl = glGenLists(1)
+        glNewList(dl, GL_COMPILE)
 
         # Draw faces
         if self.show_faces:
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
-            for i, face in enumerate(self.mesh.faces):
-                # Get color for this face
-                if i < len(self.mesh.colors):
-                    r, g, b = self.mesh.colors[i]
+            for i, face in enumerate(mesh.faces):
+                if i < len(mesh.colors):
+                    r, g, b = mesh.colors[i]
                     glColor3f(r / 255.0, g / 255.0, b / 255.0)
                 else:
-                    glColor3f(0.2, 0.6, 0.2)  # Default green
+                    glColor3f(0.2, 0.6, 0.2)
 
-                # Get normal
-                if i < len(self.mesh.normals):
-                    glNormal3fv(self.mesh.normals[i])
+                if i < len(mesh.normals):
+                    glNormal3fv(mesh.normals[i])
 
-                # Draw polygon
                 if len(face) == 3:
                     glBegin(GL_TRIANGLES)
                 elif len(face) == 4:
@@ -232,8 +289,8 @@ class GLCanvas(glcanvas.GLCanvas):
                     glBegin(GL_POLYGON)
 
                 for vi in face:
-                    if vi < len(self.mesh.vertices):
-                        glVertex3fv(self.mesh.vertices[vi])
+                    if vi < len(mesh.vertices):
+                        glVertex3fv(mesh.vertices[vi])
 
                 glEnd()
 
@@ -244,7 +301,7 @@ class GLCanvas(glcanvas.GLCanvas):
             glColor3f(0.0, 0.0, 0.0)
             glLineWidth(1.0)
 
-            for face in self.mesh.faces:
+            for face in mesh.faces:
                 if len(face) == 3:
                     glBegin(GL_TRIANGLES)
                 elif len(face) == 4:
@@ -253,8 +310,8 @@ class GLCanvas(glcanvas.GLCanvas):
                     glBegin(GL_POLYGON)
 
                 for vi in face:
-                    if vi < len(self.mesh.vertices):
-                        glVertex3fv(self.mesh.vertices[vi])
+                    if vi < len(mesh.vertices):
+                        glVertex3fv(mesh.vertices[vi])
 
                 glEnd()
 
@@ -262,6 +319,19 @@ class GLCanvas(glcanvas.GLCanvas):
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
         glEndList()
+        return dl
+
+    def build_display_list(self):
+        """Build OpenGL display list for the legacy single mesh."""
+        if self.mesh is None:
+            return
+        self.display_list = self._compile_mesh_display_list(self.mesh)
+
+    def _ensure_layer_display_lists(self):
+        """Build display lists for any layers that need them."""
+        for name, layer in self._layers.items():
+            if layer['visible'] and layer['display_list'] is None and layer['mesh'] and layer['mesh'].vertices:
+                layer['display_list'] = self._compile_mesh_display_list(layer['mesh'])
 
     def on_paint(self, event):
         """Handle paint event."""
@@ -271,9 +341,11 @@ class GLCanvas(glcanvas.GLCanvas):
         if not self.initialized:
             self.init_gl()
 
-        # Build display list if needed
+        # Build display lists if needed
         if self.mesh is not None and self.display_list is None:
             self.build_display_list()
+        if self._layers:
+            self._ensure_layer_display_lists()
 
         # Clear buffers
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
@@ -300,8 +372,14 @@ class GLCanvas(glcanvas.GLCanvas):
         glScalef(1.0, -1.0, 1.0)
         glTranslatef(-self.camera_target[0], -self.camera_target[1], -self.camera_target[2])
 
-        # Draw mesh
-        if self.display_list is not None:
+        # Draw layers (multi-layer mode)
+        if self._layers:
+            for name in self._layer_order:
+                layer = self._layers.get(name)
+                if layer and layer['visible'] and layer['display_list'] is not None:
+                    glCallList(layer['display_list'])
+        # Legacy single mesh fallback
+        elif self.display_list is not None:
             glCallList(self.display_list)
 
         # Draw axes for reference
@@ -809,7 +887,7 @@ class FlexViewerFrame(wx.Frame):
         splitter.SetMinimumPaneSize(350)
 
     def update_mesh(self):
-        """Regenerate mesh with current fold angles."""
+        """Regenerate all layer meshes with current fold angles."""
         if self.board_geometry is None:
             return
 
@@ -821,11 +899,49 @@ class FlexViewerFrame(wx.Frame):
             if i < len(self.fold_markers):
                 self.fold_markers[i].angle_degrees = angle_deg
 
-        # Extract stiffeners if PCB, config available, and display enabled
+        # Extract stiffeners
+        stiffeners = self._update_stiffener_status()
+
+        # Check if bending is enabled
+        bend_enabled = self.cb_bend.GetValue() if hasattr(self, 'cb_bend') else True
+
+        # Determine PCB directory for 3D model path resolution
+        pcb_dir = os.path.dirname(self.pcb_filepath) if self.pcb_filepath else None
+
+        # Generate all layer meshes at once (shares region computation)
+        layer_meshes = create_board_layer_meshes(
+            self.board_geometry,
+            markers=self.fold_markers,
+            num_bend_subdivisions=self.config.bend_subdivisions if hasattr(self, 'config') else 1,
+            stiffeners=stiffeners,
+            debug_regions=self.cb_debug_regions.GetValue() if hasattr(self, 'cb_debug_regions') else False,
+            apply_bend=bend_enabled,
+            pcb_dir=pcb_dir,
+            pcb=self.pcb
+        )
+
+        # Determine visibility from checkboxes
+        show_3d = self.cb_3d_models.GetValue() if hasattr(self, 'cb_3d_models') else False
+        show_comp = self.cb_components.GetValue() if hasattr(self, 'cb_components') else False
+        visibility = {
+            'board': True,
+            'traces': self.cb_traces.GetValue() if hasattr(self, 'cb_traces') else False,
+            'pads': self.cb_pads.GetValue() if hasattr(self, 'cb_pads') else False,
+            'components': show_comp and not show_3d,
+            '3d_models': show_3d,
+            'stiffeners': self.cb_stiffeners.GetValue() if hasattr(self, 'cb_stiffeners') else True,
+        }
+
+        self.canvas.set_layer_meshes(layer_meshes, visibility)
+
+        # Run validation
+        self.run_validation(stiffeners)
+
+    def _update_stiffener_status(self):
+        """Update stiffener status label and return stiffener list."""
         stiffeners = None
         show_stiffeners = self.cb_stiffeners.GetValue() if hasattr(self, 'cb_stiffeners') else True
 
-        # Update stiffener status label
         if hasattr(self, 'label_stiffener_status'):
             if not self.pcb:
                 self.label_stiffener_status.SetLabel("(No PCB loaded)")
@@ -847,7 +963,7 @@ class FlexViewerFrame(wx.Frame):
                     if bottom_count > 0:
                         parts.append(f"{bottom_count} bottom")
                     self.label_stiffener_status.SetLabel(f"Found: {', '.join(parts)}")
-                    self.label_stiffener_status.SetForegroundColour(wx.Colour(0, 128, 0))  # Green
+                    self.label_stiffener_status.SetForegroundColour(wx.Colour(0, 128, 0))
                 else:
                     layers = []
                     if self.config.stiffener_layer_top:
@@ -855,39 +971,11 @@ class FlexViewerFrame(wx.Frame):
                     if self.config.stiffener_layer_bottom:
                         layers.append(self.config.stiffener_layer_bottom)
                     self.label_stiffener_status.SetLabel(f"No shapes on {', '.join(layers)}")
-                    self.label_stiffener_status.SetForegroundColour(wx.Colour(200, 100, 0))  # Orange
+                    self.label_stiffener_status.SetForegroundColour(wx.Colour(200, 100, 0))
         elif self.pcb and self.config.has_stiffener and show_stiffeners:
             stiffeners = extract_stiffeners(self.pcb, self.config)
 
-        # Check if bending is enabled
-        bend_enabled = self.cb_bend.GetValue() if hasattr(self, 'cb_bend') else True
-
-        # Determine PCB directory for 3D model path resolution
-        pcb_dir = os.path.dirname(self.pcb_filepath) if self.pcb_filepath else None
-
-        # Check if 3D models should be shown
-        include_3d_models = self.cb_3d_models.GetValue() if hasattr(self, 'cb_3d_models') else False
-
-        # Generate mesh
-        mesh = create_board_geometry_mesh(
-            self.board_geometry,
-            markers=self.fold_markers,
-            include_traces=self.cb_traces.GetValue() if hasattr(self, 'cb_traces') else True,
-            include_pads=self.cb_pads.GetValue() if hasattr(self, 'cb_pads') else True,
-            include_components=self.cb_components.GetValue() if hasattr(self, 'cb_components') else False,
-            num_bend_subdivisions=self.config.bend_subdivisions if hasattr(self, 'config') else 1,
-            stiffeners=stiffeners,
-            debug_regions=self.cb_debug_regions.GetValue() if hasattr(self, 'cb_debug_regions') else False,
-            apply_bend=bend_enabled,
-            include_3d_models=include_3d_models,
-            pcb_dir=pcb_dir,
-            pcb=self.pcb
-        )
-
-        self.canvas.set_mesh(mesh)
-
-        # Run validation
-        self.run_validation(stiffeners)
+        return stiffeners
 
     def on_fold_angle_changed(self, fold_index: int, angle: float):
         """Handle fold angle slider change."""
@@ -973,8 +1061,23 @@ class FlexViewerFrame(wx.Frame):
         self.canvas.set_wireframe(self.cb_wireframe.GetValue())
 
     def on_display_option_changed(self, event):
-        """Handle display option change."""
-        self.update_mesh()
+        """Handle display option change — toggle layer visibility without rebuild."""
+        if not self.canvas._layers:
+            # First time or legacy mode: do full rebuild
+            self.update_mesh()
+            return
+
+        show_3d = self.cb_3d_models.GetValue() if hasattr(self, 'cb_3d_models') else False
+        show_comp = self.cb_components.GetValue() if hasattr(self, 'cb_components') else False
+
+        self.canvas.set_layer_visible('traces', self.cb_traces.GetValue() if hasattr(self, 'cb_traces') else False)
+        self.canvas.set_layer_visible('pads', self.cb_pads.GetValue() if hasattr(self, 'cb_pads') else False)
+        self.canvas.set_layer_visible('components', show_comp and not show_3d)
+        self.canvas.set_layer_visible('3d_models', show_3d)
+        self.canvas.set_layer_visible('stiffeners', self.cb_stiffeners.GetValue() if hasattr(self, 'cb_stiffeners') else True)
+
+        # Update stiffener status label
+        self._update_stiffener_status()
 
     def on_settings_changed(self, event):
         """Handle PCB settings change."""
@@ -1159,22 +1262,18 @@ class FlexViewerFrame(wx.Frame):
         """Reset camera to default view."""
         self.canvas.camera_rot_x = 30.0
         self.canvas.camera_rot_z = 45.0
-        if self.canvas.mesh and self.canvas.mesh.vertices:
-            xs = [v[0] for v in self.canvas.mesh.vertices]
-            ys = [v[1] for v in self.canvas.mesh.vertices]
-            zs = [v[2] for v in self.canvas.mesh.vertices]
-            self.canvas.camera_target = [
-                (min(xs) + max(xs)) / 2,
-                (min(ys) + max(ys)) / 2,
-                (min(zs) + max(zs)) / 2
-            ]
-            size = max(max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs))
-            self.canvas.camera_distance = size * 2
+        # Use board layer for centering, or fall back to visible mesh
+        board_layer = self.canvas._layers.get('board')
+        if board_layer and board_layer['mesh'] and board_layer['mesh'].vertices:
+            self.canvas._auto_center_camera(board_layer['mesh'].vertices)
+        elif self.canvas.mesh and self.canvas.mesh.vertices:
+            self.canvas._auto_center_camera(self.canvas.mesh.vertices)
         self.canvas.Refresh()
 
     def on_export_obj(self, event):
         """Export to OBJ file."""
-        if self.canvas.mesh is None:
+        mesh = self.canvas.get_visible_mesh()
+        if mesh is None:
             wx.MessageBox("No mesh to export.", "Export Error", wx.OK | wx.ICON_WARNING)
             return
 
@@ -1186,12 +1285,13 @@ class FlexViewerFrame(wx.Frame):
         ) as dialog:
             if dialog.ShowModal() == wx.ID_OK:
                 path = dialog.GetPath()
-                self.canvas.mesh.to_obj(path)
+                mesh.to_obj(path)
                 wx.MessageBox(f"Exported to:\n{path}", "Export Complete", wx.OK | wx.ICON_INFORMATION)
 
     def on_export_stl(self, event):
         """Export to STL file."""
-        if self.canvas.mesh is None:
+        mesh = self.canvas.get_visible_mesh()
+        if mesh is None:
             wx.MessageBox("No mesh to export.", "Export Error", wx.OK | wx.ICON_WARNING)
             return
 
@@ -1203,7 +1303,7 @@ class FlexViewerFrame(wx.Frame):
         ) as dialog:
             if dialog.ShowModal() == wx.ID_OK:
                 path = dialog.GetPath()
-                self.canvas.mesh.to_stl(path)
+                mesh.to_stl(path)
                 wx.MessageBox(f"Exported to:\n{path}", "Export Complete", wx.OK | wx.ICON_INFORMATION)
 
     def on_export_step(self, event):

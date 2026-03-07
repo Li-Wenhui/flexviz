@@ -1904,3 +1904,116 @@ def create_board_geometry_mesh(
 
     mesh.compute_normals()
     return mesh
+
+
+def create_board_layer_meshes(
+    board: BoardGeometry,
+    markers: list[FoldMarker] = None,
+    component_height: float = 2.0,
+    subdivide_length: float = 1.0,
+    num_bend_subdivisions: int = 1,
+    stiffeners: list = None,
+    debug_regions: bool = False,
+    apply_bend: bool = True,
+    pcb_dir: str = None,
+    pcb=None
+) -> dict[str, Mesh]:
+    """
+    Create separate meshes for each display layer.
+
+    Returns a dict with keys: 'board', 'traces', 'pads', 'components',
+    '3d_models', 'stiffeners'. Each value is a Mesh (possibly empty).
+    Regions are computed once and shared across all layers.
+    """
+    result = {}
+
+    # Compute regions (shared across all layers)
+    regions = None
+    if markers and board.outline.vertices:
+        outline_verts = [(v[0], v[1]) for v in board.outline.vertices]
+        cutout_verts = [[(v[0], v[1]) for v in c.vertices] for c in (board.cutouts or [])]
+        regions = split_board_into_regions(
+            outline_verts,
+            cutout_verts,
+            markers,
+            num_bend_subdivisions=num_bend_subdivisions
+        )
+
+    active_regions = regions if apply_bend else None
+
+    # Board outline
+    board_mesh = Mesh()
+    if board.outline.vertices:
+        board_mesh = create_board_mesh_with_regions(
+            board.outline,
+            board.thickness,
+            markers=markers,
+            subdivide_length=subdivide_length,
+            cutouts=board.cutouts,
+            num_bend_subdivisions=num_bend_subdivisions,
+            debug_regions=debug_regions,
+            apply_bend=apply_bend
+        )
+    board_mesh.compute_normals()
+    result['board'] = board_mesh
+
+    # Traces
+    traces_mesh = Mesh()
+    z_offset = 0.05
+    for layer, traces in board.traces.items():
+        for trace in traces:
+            trace_mesh = create_trace_mesh(
+                trace, z_offset, active_regions,
+                pcb_thickness=board.thickness,
+                markers=markers,
+                num_bend_subdivisions=num_bend_subdivisions
+            )
+            traces_mesh.merge(trace_mesh)
+    traces_mesh.compute_normals()
+    result['traces'] = traces_mesh
+
+    # Pads
+    pads_mesh = Mesh()
+    z_offset = 0.08
+    for pad in board.all_pads:
+        pad_mesh = create_pad_mesh(pad, z_offset, active_regions, board.thickness)
+        pads_mesh.merge(pad_mesh)
+    pads_mesh.compute_normals()
+    result['pads'] = pads_mesh
+
+    # Components (box placeholders)
+    comp_mesh = Mesh()
+    for comp in board.components:
+        cm = create_component_mesh(comp, component_height, active_regions, board.thickness)
+        comp_mesh.merge(cm)
+    comp_mesh.compute_normals()
+    result['components'] = comp_mesh
+
+    # 3D Models
+    models_mesh = Mesh()
+    if pcb_dir:
+        for comp in board.components:
+            model_mesh = create_component_3d_model_mesh(
+                comp, pcb_dir, board.thickness, active_regions, pcb
+            )
+            models_mesh.merge(model_mesh)
+    models_mesh.compute_normals()
+    result['3d_models'] = models_mesh
+
+    # Stiffeners
+    stiff_mesh = Mesh()
+    if stiffeners and apply_bend:
+        for stiffener in stiffeners:
+            sm = create_stiffener_mesh(
+                outline=stiffener.outline,
+                stiffener_thickness=stiffener.thickness,
+                pcb_thickness=board.thickness,
+                side=stiffener.side,
+                regions=regions,
+                cutouts=stiffener.cutouts if hasattr(stiffener, 'cutouts') else None
+            )
+            stiff_mesh.merge(sm)
+    stiff_mesh.compute_normals()
+    result['stiffeners'] = stiff_mesh
+
+    return result

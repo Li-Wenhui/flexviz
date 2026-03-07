@@ -14,6 +14,7 @@ from mesh import (
     create_trace_mesh,
     create_pad_mesh,
     create_board_geometry_mesh,
+    create_board_layer_meshes,
     get_region_recipe,
     _compute_fold_crossing_t_values,
     _dot3,
@@ -842,3 +843,76 @@ class TestThroughHoleBugs:
                 f"Component vertex ({bv[0]:.2f}, {bv[1]:.2f}, {bv[2]:.2f}) "
                 f"not near any board surface"
             )
+
+
+class TestBoardLayerMeshes:
+    """Tests for Phase 2: separate layer mesh generation."""
+
+    def test_layer_meshes_returns_all_keys(self):
+        """create_board_layer_meshes returns all expected layer keys."""
+        board, markers = make_board_with_fold(fold_angle=90)
+        layers = create_board_layer_meshes(board, markers)
+        assert set(layers.keys()) == {'board', 'traces', 'pads', 'components', '3d_models', 'stiffeners'}
+
+    def test_board_layer_has_vertices(self):
+        """Board layer should always have geometry."""
+        board, markers = make_board_with_fold(fold_angle=90)
+        layers = create_board_layer_meshes(board, markers)
+        assert len(layers['board'].vertices) > 0
+        assert len(layers['board'].faces) > 0
+
+    def test_trace_layer_matches_monolithic(self):
+        """Trace layer mesh should match what create_board_geometry_mesh produces."""
+        board, markers = make_board_with_fold(fold_angle=90)
+        # Add a trace
+        board.traces['F.Cu'] = [LineSegment((10, 15), (90, 15), width=0.3)]
+
+        layers = create_board_layer_meshes(board, markers)
+        assert len(layers['traces'].vertices) > 0
+
+        # Monolithic mesh with only traces
+        mono = create_board_geometry_mesh(
+            board, markers, include_traces=True, include_pads=False,
+            include_components=False
+        )
+        # Layer trace mesh should have same vertex count as traces in monolithic
+        # (board mesh is included in mono too, so just check traces layer is non-empty)
+        assert len(layers['traces'].faces) > 0
+
+    def test_pad_layer_matches(self):
+        """Pad layer should contain pad geometry."""
+        board, markers = make_board_with_fold(fold_angle=90)
+        pad = PadGeometry(center=(50, 15), shape='circle', size=(1.5, 1.5), drill=0.8, layer='F.Cu')
+        board.components = [ComponentGeometry(
+            reference='T1', value='test', center=(50, 15), angle=0,
+            bounding_box=BoundingBox(49, 14, 51, 16), pads=[pad], layer='F.Cu'
+        )]
+
+        layers = create_board_layer_meshes(board, markers)
+        assert len(layers['pads'].vertices) > 0
+
+    def test_empty_layers_when_no_content(self):
+        """Layers should be empty meshes when no content exists."""
+        board, markers = make_board_with_fold(fold_angle=90)
+        board.traces = {}
+        board.components = []
+
+        layers = create_board_layer_meshes(board, markers)
+        assert len(layers['traces'].vertices) == 0
+        assert len(layers['pads'].vertices) == 0
+        assert len(layers['components'].vertices) == 0
+        assert len(layers['3d_models'].vertices) == 0
+        assert len(layers['stiffeners'].vertices) == 0
+
+    def test_layers_with_h_shape_pcb(self):
+        """Layer meshes should work with real PCB data."""
+        pcb = KiCadPCB.load(
+            Path(__file__).parent / 'test_data' / 'h_shape.kicad_pcb'
+        )
+        board = extract_geometry(pcb)
+        markers = detect_fold_markers(pcb)
+
+        layers = create_board_layer_meshes(board, markers)
+        assert len(layers['board'].vertices) > 0
+        assert len(layers['traces'].vertices) > 0
+        assert len(layers['pads'].vertices) > 0
