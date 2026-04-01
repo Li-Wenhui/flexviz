@@ -35,7 +35,7 @@ To fix this, open Command Prompt as Administrator and run:
 
 Or if KiCad is installed in the default location:
 
-    "C:\\Program Files\\KiCad\\9.0\\bin\\python.exe" -m pip install PyOpenGL PyOpenGL_accelerate
+    "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe" -m pip install PyOpenGL PyOpenGL_accelerate
 
 Then restart KiCad."""
     elif sys.platform == 'darwin':

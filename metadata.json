@@ -21,7 +21,7 @@
             "version": "1.1.0",
             "status": "stable",
             "kicad_version": "7.0",
-            "kicad_version_max": "9.99",
+            "kicad_version_max": "10.99",
             "download_url": "https://github.com/Aightech/flexviz/releases/download/v1.1.0/flexviz-1.1.0.zip",
             "download_sha256": "9f905fe3da7890cbcf9e7b37e1b66ba3c9f7e3c5de7ed438290d077f828f0833",
             "download_size": 115769,

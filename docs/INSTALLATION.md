@@ -50,10 +50,10 @@ pip install --user --break-system-packages PyOpenGL
 #### Windows
 Open **Command Prompt as Administrator**:
 ```cmd
-"C:\Program Files\KiCad\9.0\bin\python.exe" -m pip install PyOpenGL PyOpenGL_accelerate
+"C:\Program Files\KiCad\10.0\bin\python.exe" -m pip install PyOpenGL PyOpenGL_accelerate
 ```
 
-For KiCad 8.x, replace `9.0` with `8.0`.
+For older versions, replace `10.0` with `9.0` or `8.0`.
 
 #### macOS
 ```bash

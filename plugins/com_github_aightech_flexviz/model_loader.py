@@ -205,6 +205,12 @@ def extract_embedded_model(embed_url: str, pcb, pcb_dir: str = None) -> Optional
 
 
 KICAD_ENV_VARS = {
+    "KICAD10_3DMODEL_DIR": [
+        "/usr/share/kicad/3dmodels",
+        "/usr/local/share/kicad/3dmodels",
+        os.path.expanduser("~/.local/share/kicad/10.0/3dmodels"),
+        "C:/Program Files/KiCad/10.0/share/kicad/3dmodels",
+    ],
     "KICAD9_3DMODEL_DIR": [
         "/usr/share/kicad/3dmodels",
         "/usr/local/share/kicad/3dmodels",

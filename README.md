@@ -152,7 +152,7 @@ cd flexviz
 ```
 
 The install script will:
-- Auto-detect your KiCad version (7.0, 8.0, 9.0)
+- Auto-detect your KiCad version (7.0, 8.0, 9.0, 10.0)
 - Create a symlink for development (or copy for distribution)
 - Show you where the plugin was installed
 
@@ -161,6 +161,9 @@ The install script will:
 Download the latest release ZIP and extract to your KiCad plugins directory:
 
 ```bash
+# For KiCad 10.x
+unzip flexviz-*.zip -d ~/.local/share/kicad/10.0/3rdparty/plugins/
+
 # For KiCad 9.x
 unzip flexviz-*.zip -d ~/.local/share/kicad/9.0/3rdparty/plugins/
 

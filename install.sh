@@ -12,6 +12,7 @@ detect_kicad_plugin_dir() {
     # Check for common KiCad plugin locations
     # KiCad 9.0+ uses 3rdparty/plugins instead of scripting/plugins
     local KICAD_DIRS=(
+        "$HOME/.local/share/kicad/10.0/3rdparty/plugins"
         "$HOME/.local/share/kicad/9.0/3rdparty/plugins"
         "$HOME/.local/share/kicad/8.0/3rdparty/plugins"
         "$HOME/.local/share/kicad/8.0/scripting/plugins"
@@ -27,8 +28,8 @@ detect_kicad_plugin_dir() {
         fi
     done
 
-    # Default to KiCad 9.0 location
-    echo "$HOME/.local/share/kicad/9.0/3rdparty/plugins"
+    # Default to KiCad 10.0 location
+    echo "$HOME/.local/share/kicad/10.0/3rdparty/plugins"
 }
 
 PLUGIN_DIR=$(detect_kicad_plugin_dir)
