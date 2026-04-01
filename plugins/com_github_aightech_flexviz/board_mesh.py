@@ -15,7 +15,8 @@ try:
     from .triangulation import triangulate_polygon, triangulate_with_holes
     from .mesh_types import (
         Mesh, COLOR_BOARD, COLOR_CUTOUT, get_region_recipe,
-        transform_vertices_with_thickness, get_debug_color, snap_to_plane
+        transform_vertices_with_thickness, get_debug_color, snap_to_plane,
+        PrecomputedBoardData, PrecomputedRegionData,
     )
 except ImportError:
     from geometry import Polygon, BoardGeometry, subdivide_polygon
@@ -25,11 +26,12 @@ except ImportError:
     from triangulation import triangulate_polygon, triangulate_with_holes
     from mesh_types import (
         Mesh, COLOR_BOARD, COLOR_CUTOUT, get_region_recipe,
-        transform_vertices_with_thickness, get_debug_color, snap_to_plane
+        transform_vertices_with_thickness, get_debug_color, snap_to_plane,
+        PrecomputedBoardData, PrecomputedRegionData,
     )
 
 
-def create_board_mesh_with_regions(
+def precompute_board_mesh(
     outline: Polygon,
     thickness: float,
     markers: list[FoldMarker] = None,
@@ -37,32 +39,26 @@ def create_board_mesh_with_regions(
     cutouts: list[Polygon] = None,
     num_bend_subdivisions: int = 1,
     debug_regions: bool = False,
-    apply_bend: bool = True
-) -> Mesh:
+) -> PrecomputedBoardData:
     """
-    Create a 3D mesh for the board, split by fold regions.
-
-    This function splits the board into regions along fold lines and
-    triangulates each region separately. This ensures no triangles cross
-    fold boundaries, preventing visual artifacts when bending.
+    Precompute angle-independent board mesh data: region splitting, subdivision,
+    triangulation, and 2D vertex positions.
 
     Args:
         outline: Board outline polygon
         thickness: Board thickness in mm
-        markers: List of fold markers (for region splitting and 3D transform)
+        markers: List of fold markers (for region splitting)
         subdivide_length: Maximum edge length for subdivision
         cutouts: List of cutout polygons (holes in the board)
         num_bend_subdivisions: Number of strips in bend zone
         debug_regions: If True, color each region differently for debugging
-        apply_bend: If False, show flat board with regions but no bending
 
     Returns:
-        Mesh representing the board
+        PrecomputedBoardData with all angle-independent data
     """
     if not outline.vertices:
-        return Mesh()
+        return PrecomputedBoardData(region_data=[], thickness=thickness, debug_regions=debug_regions)
 
-    mesh = Mesh()
     cutouts = cutouts or []
 
     # Convert outline and cutouts to lists of tuples
@@ -73,7 +69,6 @@ def create_board_mesh_with_regions(
     if markers:
         regions = split_board_into_regions(outline_verts, cutout_verts, markers, num_bend_subdivisions)
     else:
-        # No markers - create single region covering whole board
         single_region = Region(
             index=0,
             outline=outline_verts,
@@ -82,7 +77,7 @@ def create_board_mesh_with_regions(
         )
         regions = [single_region]
 
-    # Process each region
+    region_data_list = []
     for region in regions:
         # Choose color based on debug mode
         if debug_regions:
@@ -102,11 +97,59 @@ def create_board_mesh_with_regions(
             sub_hole = subdivide_polygon(hole_poly, subdivide_length)
             region_holes_2d.append([(v[0], v[1]) for v in sub_hole.vertices])
 
-        # Get fold recipe with classifications for this region
-        # When apply_bend is False, use empty recipe to keep board flat
+        # Triangulate this region (angle-independent)
+        has_holes = bool(region_holes_2d)
+        if has_holes:
+            triangles, merged = triangulate_with_holes(subdivided_verts, region_holes_2d)
+            merged_2d = list(merged)
+        else:
+            triangles = triangulate_polygon(subdivided_verts)
+            merged_2d = None
+
+        region_data_list.append(PrecomputedRegionData(
+            region=region,
+            subdivided_verts=subdivided_verts,
+            region_holes_2d=region_holes_2d,
+            triangles=triangles,
+            merged_2d=merged_2d,
+            has_holes=has_holes,
+            color=region_color,
+        ))
+
+    return PrecomputedBoardData(
+        region_data=region_data_list,
+        thickness=thickness,
+        debug_regions=debug_regions,
+    )
+
+
+def transform_board_mesh(precomputed: PrecomputedBoardData, apply_bend: bool = True) -> Mesh:
+    """
+    Transform precomputed 2D board vertices to 3D using current fold angles.
+
+    This is the fast path: it skips region splitting, subdivision, and triangulation,
+    and only performs the 2D-to-3D transformation using current fold recipes.
+
+    Args:
+        precomputed: PrecomputedBoardData from precompute_board_mesh()
+        apply_bend: If False, show flat board with regions but no bending
+
+    Returns:
+        Mesh representing the board
+    """
+    mesh = Mesh()
+    thickness = precomputed.thickness
+
+    for rd in precomputed.region_data:
+        region = rd.region
+        region_color = rd.color
+        subdivided_verts = rd.subdivided_verts
+        region_holes_2d = rd.region_holes_2d
+
+        # Get fold recipe (angle-dependent via marker.angle_degrees)
         region_recipe = get_region_recipe(region) if apply_bend else []
 
-        # Transform vertices to 3D with thickness offset using recipe-based function
+        # Transform vertices to 3D with thickness offset
         top_vertices, bottom_vertices, vertex_normals = transform_vertices_with_thickness(
             subdivided_verts, region_recipe, thickness
         )
@@ -157,9 +200,10 @@ def create_board_mesh_with_regions(
             hole_bottom_indices.append(hb_indices)
             hole_2d_lists.append(hole_2d)
 
-        # Triangulate this region
-        if region_holes_2d:
-            triangles, merged = triangulate_with_holes(subdivided_verts, region_holes_2d)
+        # Use precomputed triangulation
+        if rd.has_holes:
+            triangles = rd.triangles
+            merged_2d = rd.merged_2d
 
             # Build vertex mapping
             all_2d = list(subdivided_verts)
@@ -174,7 +218,7 @@ def create_board_mesh_with_regions(
             # Map merged vertices to mesh indices
             merged_top = []
             merged_bottom = []
-            for v2d in merged:
+            for v2d in merged_2d:
                 found = False
                 for i, av in enumerate(all_2d):
                     if abs(av[0] - v2d[0]) < 0.001 and abs(av[1] - v2d[1]) < 0.001:
@@ -199,8 +243,8 @@ def create_board_mesh_with_regions(
             for tri in triangles:
                 mesh.add_triangle(merged_bottom[tri[0]], merged_bottom[tri[2]], merged_bottom[tri[1]], region_color)
         else:
-            # No holes in this region
-            triangles = triangulate_polygon(subdivided_verts)
+            # No holes in this region — use precomputed triangles
+            triangles = rd.triangles
             for tri in triangles:
                 mesh.add_triangle(top_indices[tri[0]], top_indices[tri[1]], top_indices[tri[2]], region_color)
             for tri in triangles:
@@ -218,4 +262,41 @@ def create_board_mesh_with_regions(
                 j = (i + 1) % nh
                 mesh.add_quad(ht_idx[j], ht_idx[i], hb_idx[i], hb_idx[j], COLOR_CUTOUT)
 
+    return mesh
+
+
+def create_board_mesh_with_regions(
+    outline: Polygon,
+    thickness: float,
+    markers: list[FoldMarker] = None,
+    subdivide_length: float = 1.0,
+    cutouts: list[Polygon] = None,
+    num_bend_subdivisions: int = 1,
+    debug_regions: bool = False,
+    apply_bend: bool = True
+) -> Mesh:
+    """
+    Create a 3D mesh for the board, split by fold regions.
+
+    This is a convenience wrapper that calls precompute_board_mesh() then
+    transform_board_mesh(). For repeated angle changes, call them separately.
+
+    Args:
+        outline: Board outline polygon
+        thickness: Board thickness in mm
+        markers: List of fold markers (for region splitting and 3D transform)
+        subdivide_length: Maximum edge length for subdivision
+        cutouts: List of cutout polygons (holes in the board)
+        num_bend_subdivisions: Number of strips in bend zone
+        debug_regions: If True, color each region differently for debugging
+        apply_bend: If False, show flat board with regions but no bending
+
+    Returns:
+        Mesh representing the board
+    """
+    precomputed = precompute_board_mesh(
+        outline, thickness, markers, subdivide_length, cutouts,
+        num_bend_subdivisions, debug_regions,
+    )
+    mesh = transform_board_mesh(precomputed, apply_bend)
     return mesh

@@ -20,7 +20,7 @@ try:
     from .triangulation import triangulate_polygon, triangulate_with_holes
     from .mesh_types import (
         Mesh, COLOR_COPPER, COLOR_PAD, COLOR_COMPONENT, COLOR_STIFFENER,
-        COLOR_CUTOUT, COLOR_MODEL_3D, get_region_recipe
+        COLOR_CUTOUT, COLOR_MODEL_3D, get_region_recipe, PrecomputedTraceData
     )
 except ImportError:
     from geometry import (
@@ -35,7 +35,7 @@ except ImportError:
     from triangulation import triangulate_polygon, triangulate_with_holes
     from mesh_types import (
         Mesh, COLOR_COPPER, COLOR_PAD, COLOR_COMPONENT, COLOR_STIFFENER,
-        COLOR_CUTOUT, COLOR_MODEL_3D, get_region_recipe
+        COLOR_CUTOUT, COLOR_MODEL_3D, get_region_recipe, PrecomputedTraceData
     )
 
 
@@ -206,6 +206,157 @@ def create_trace_mesh(
     # Create quads between the two edges
     # Reverse winding for back layer so normals face outward
     num_quads = len(t_values) - 1
+    for i in range(num_quads):
+        if is_back_layer:
+            mesh.add_quad(
+                edge2_indices[i], edge2_indices[i + 1],
+                edge1_indices[i + 1], edge1_indices[i],
+                COLOR_COPPER
+            )
+        else:
+            mesh.add_quad(
+                edge1_indices[i], edge1_indices[i + 1],
+                edge2_indices[i + 1], edge2_indices[i],
+                COLOR_COPPER
+            )
+
+    return mesh
+
+
+def precompute_trace_mesh(
+    segment: LineSegment,
+    regions: list[Region] = None,
+    subdivisions: int = 20,
+    markers: list[FoldMarker] = None,
+    num_bend_subdivisions: int = 1
+) -> PrecomputedTraceData:
+    """
+    Precompute angle-independent trace data: ribbon geometry, t-values,
+    region assignments for each point.
+
+    Args:
+        segment: Trace line segment with width
+        regions: List of Region objects for region-based transformation
+        subdivisions: Number of subdivisions along the trace
+        markers: List of fold markers for adaptive subdivision at fold boundaries
+        num_bend_subdivisions: Number of strips per bend zone
+
+    Returns:
+        PrecomputedTraceData with all angle-independent data, or None if invalid
+    """
+    ribbon = line_segment_to_ribbon(segment)
+    if len(ribbon.vertices) != 4:
+        return None
+
+    is_back_layer = segment.layer == "B.Cu"
+    v0, v1, v2, v3 = ribbon.vertices
+
+    # Build t-values: uniform subdivisions + fold zone boundary crossings
+    t_values = [i / subdivisions for i in range(subdivisions + 1)]
+    if regions and markers:
+        center_start = ((v0[0] + v3[0]) / 2, (v0[1] + v3[1]) / 2)
+        center_end = ((v1[0] + v2[0]) / 2, (v1[1] + v2[1]) / 2)
+        crossings = _compute_fold_crossing_t_values(center_start, center_end, markers, num_bend_subdivisions)
+        t_values.extend(crossings)
+        t_values = sorted(set(t_values))
+
+    # For each t-value, compute 2D points and their region recipes
+    point_data = []
+    last_valid_region_1 = None
+    last_valid_region_2 = None
+
+    for t in t_values:
+        p1 = (v0[0] + t * (v1[0] - v0[0]), v0[1] + t * (v1[1] - v0[1]))
+        p2 = (v3[0] + t * (v2[0] - v3[0]), v3[1] + t * (v2[1] - v3[1]))
+
+        # Find region for each point with fallback
+        region_1 = None
+        region_2 = None
+        if regions:
+            containing_region_1 = find_containing_region(p1, regions)
+            if containing_region_1:
+                last_valid_region_1 = containing_region_1
+            elif last_valid_region_1:
+                containing_region_1 = last_valid_region_1
+            region_1 = containing_region_1
+
+            containing_region_2 = find_containing_region(p2, regions)
+            if containing_region_2:
+                last_valid_region_2 = containing_region_2
+            elif last_valid_region_2:
+                containing_region_2 = last_valid_region_2
+            region_2 = containing_region_2
+
+        point_data.append((p1, p2, region_1, region_2))
+
+    return PrecomputedTraceData(
+        t_values=t_values,
+        v0=v0, v1=v1, v2=v2, v3=v3,
+        is_back_layer=is_back_layer,
+        point_data=point_data,
+    )
+
+
+def transform_trace_mesh(
+    precomputed: PrecomputedTraceData,
+    z_offset: float,
+    pcb_thickness: float = 0.0,
+) -> Mesh:
+    """
+    Transform precomputed trace data to 3D mesh using current fold angles.
+
+    This is the fast path: skips ribbon computation, t-value computation,
+    and region lookups.
+
+    Args:
+        precomputed: PrecomputedTraceData from precompute_trace_mesh()
+        z_offset: Z offset for the trace (along surface normal)
+        pcb_thickness: PCB thickness for back layer trace positioning
+
+    Returns:
+        Mesh representing the trace
+    """
+    mesh = Mesh()
+    is_back_layer = precomputed.is_back_layer
+
+    edge1_points = []
+    edge2_points = []
+    last_n1 = None
+    last_n2 = None
+
+    for p1, p2, region_1, region_2 in precomputed.point_data:
+        region_recipe_1 = get_region_recipe(region_1) if region_1 else []
+        region_recipe_2 = get_region_recipe(region_2) if region_2 else []
+
+        # Transform to 3D with normal
+        p1_3d, n1 = transform_point_and_normal(p1, region_recipe_1)
+        p2_3d, n2 = transform_point_and_normal(p2, region_recipe_2)
+
+        # Normal consistency check
+        if last_n1 and _dot3(n1, last_n1) < 0:
+            n1 = (-n1[0], -n1[1], -n1[2])
+        if last_n2 and _dot3(n2, last_n2) < 0:
+            n2 = (-n2[0], -n2[1], -n2[2])
+        last_n1 = n1
+        last_n2 = n2
+
+        if is_back_layer:
+            total_offset = -(pcb_thickness + z_offset)
+        else:
+            total_offset = z_offset
+
+        p1_3d = (p1_3d[0] + n1[0] * total_offset, p1_3d[1] + n1[1] * total_offset, p1_3d[2] + n1[2] * total_offset)
+        p2_3d = (p2_3d[0] + n2[0] * total_offset, p2_3d[1] + n2[1] * total_offset, p2_3d[2] + n2[2] * total_offset)
+
+        edge1_points.append(p1_3d)
+        edge2_points.append(p2_3d)
+
+    # Add vertices
+    edge1_indices = [mesh.add_vertex(p) for p in edge1_points]
+    edge2_indices = [mesh.add_vertex(p) for p in edge2_points]
+
+    # Create quads
+    num_quads = len(precomputed.t_values) - 1
     for i in range(num_quads):
         if is_back_layer:
             mesh.add_quad(

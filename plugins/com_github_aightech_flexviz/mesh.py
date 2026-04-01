@@ -30,16 +30,23 @@ try:
         get_debug_color,
         snap_to_plane,
     )
-    from .board_mesh import create_board_mesh_with_regions             # noqa: F401
+    from .board_mesh import (                                          # noqa: F401
+        create_board_mesh_with_regions,
+        precompute_board_mesh,
+        transform_board_mesh,
+    )
     from .trace_mesh import (                                         # noqa: F401
         _compute_fold_crossing_t_values,
         _dot3,
         create_trace_mesh,
+        precompute_trace_mesh,
+        transform_trace_mesh,
         create_pad_mesh,
         create_component_mesh,
         create_stiffener_mesh,
         create_component_3d_model_mesh,
     )
+    from .mesh_types import PrecomputedLayerData, PrecomputedBoardData, PrecomputedTraceData  # noqa: F401
 except ImportError:
     from triangulation import (                                       # noqa: F401
         find_mutually_visible_vertex,
@@ -58,16 +65,23 @@ except ImportError:
         get_debug_color,
         snap_to_plane,
     )
-    from board_mesh import create_board_mesh_with_regions              # noqa: F401
+    from board_mesh import (                                           # noqa: F401
+        create_board_mesh_with_regions,
+        precompute_board_mesh,
+        transform_board_mesh,
+    )
     from trace_mesh import (                                          # noqa: F401
         _compute_fold_crossing_t_values,
         _dot3,
         create_trace_mesh,
+        precompute_trace_mesh,
+        transform_trace_mesh,
         create_pad_mesh,
         create_component_mesh,
         create_stiffener_mesh,
         create_component_3d_model_mesh,
     )
+    from mesh_types import PrecomputedLayerData, PrecomputedBoardData, PrecomputedTraceData  # noqa: F401
 
 # Re-export polygon_ops symbols that were previously importable via mesh
 try:
@@ -357,3 +371,129 @@ def create_board_layer_meshes(
         '3d_models': build_3d_models_layer(board, active_regions, pcb_dir, pcb),
         'stiffeners': build_stiffeners_layer(board, regions, stiffeners, apply_bend),
     }
+
+
+# ============================================================================
+# Precompute / retransform (decoupled angle updates)
+# ============================================================================
+
+def precompute_all_layers(board, markers, num_bend_subdivisions=1,
+                          subdivide_length=1.0, debug_regions=False):
+    """Precompute angle-independent data for board and trace layers.
+
+    Called once when the board or markers change (topology change).
+    The returned PrecomputedLayerData can be passed to retransform_all_layers()
+    for fast angle-only updates.
+
+    Pads, components, stiffeners, and 3D models are NOT precomputed — they are
+    fast enough to rebuild each time, and their geometry is simpler.
+
+    Returns:
+        PrecomputedLayerData
+    """
+    # Precompute board mesh data
+    board_precomputed = None
+    if board.outline.vertices:
+        board_precomputed = precompute_board_mesh(
+            board.outline,
+            board.thickness,
+            markers=markers,
+            subdivide_length=subdivide_length,
+            cutouts=board.cutouts,
+            num_bend_subdivisions=num_bend_subdivisions,
+            debug_regions=debug_regions,
+        )
+
+    # Precompute regions for traces (needed for region lookups)
+    regions = None
+    if markers and board.outline.vertices:
+        outline_verts = [(v[0], v[1]) for v in board.outline.vertices]
+        cutout_verts = [[(v[0], v[1]) for v in c.vertices] for c in (board.cutouts or [])]
+        regions = split_board_into_regions(
+            outline_verts, cutout_verts, markers,
+            num_bend_subdivisions=num_bend_subdivisions,
+        )
+
+    # Precompute trace data
+    trace_precomputed = []
+    for layer, traces in board.traces.items():
+        for trace in traces:
+            td = precompute_trace_mesh(
+                trace, regions,
+                markers=markers,
+                num_bend_subdivisions=num_bend_subdivisions,
+            )
+            if td is not None:
+                trace_precomputed.append(td)
+
+    return PrecomputedLayerData(
+        board=board_precomputed,
+        traces=trace_precomputed,
+        regions=regions,
+        markers=list(markers) if markers else [],
+        num_bend_subdivisions=num_bend_subdivisions,
+        board_thickness=board.thickness,
+    )
+
+
+def retransform_all_layers(precomputed, board, active_regions, markers,
+                           num_bend_subdivisions=1, apply_bend=True,
+                           stiffeners=None, pcb_dir=None, pcb=None,
+                           debug_regions=False, visibility=None):
+    """Fast path: retransform board + traces from precomputed data, rebuild other layers.
+
+    For board and traces, this skips the expensive region splitting, subdivision,
+    and triangulation steps — only the 2D→3D vertex transformation is performed.
+
+    Pads, components, stiffeners, and 3D models are rebuilt from scratch (they're fast).
+
+    Args:
+        precomputed: PrecomputedLayerData from precompute_all_layers()
+        board: BoardGeometry (needed for pads/components/stiffeners)
+        active_regions: Region objects for non-board layers (None if bend disabled)
+        markers: Current fold markers with updated angles
+        num_bend_subdivisions: Number of bend zone strips
+        apply_bend: Whether bending is enabled
+        stiffeners: Stiffener objects
+        pcb_dir: PCB directory for 3D models
+        pcb: KiCadPCB object
+        debug_regions: Debug region coloring
+        visibility: Dict of layer_name -> bool (for skipping invisible layers)
+
+    Returns:
+        Dict of layer_name -> Mesh
+    """
+    visibility = visibility or {}
+    result = {}
+
+    # Board: fast retransform from precomputed data
+    if precomputed.board:
+        board_mesh = transform_board_mesh(precomputed.board, apply_bend)
+        board_mesh.compute_normals()
+    else:
+        board_mesh = Mesh()
+    result['board'] = board_mesh
+
+    # Traces: fast retransform from precomputed data
+    trace_mesh = Mesh()
+    z_offset = 0.05
+    for td in (precomputed.traces or []):
+        tm = transform_trace_mesh(td, z_offset, pcb_thickness=board.thickness)
+        trace_mesh.merge(tm)
+    trace_mesh.compute_normals()
+    result['traces'] = trace_mesh
+
+    # Pads: full rebuild (fast, no precomputation needed)
+    result['pads'] = build_pads_layer(board, active_regions)
+
+    # Components: full rebuild
+    result['components'] = build_components_layer(board, active_regions)
+
+    # 3D models: full rebuild
+    result['3d_models'] = build_3d_models_layer(board, active_regions, pcb_dir, pcb)
+
+    # Stiffeners: full rebuild
+    regions = precomputed.regions
+    result['stiffeners'] = build_stiffeners_layer(board, regions, stiffeners, apply_bend)
+
+    return result

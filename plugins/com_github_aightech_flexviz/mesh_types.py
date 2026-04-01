@@ -204,6 +204,54 @@ def get_debug_color(region_index: int) -> tuple[int, int, int]:
     return DEBUG_REGION_COLORS[region_index % len(DEBUG_REGION_COLORS)]
 
 
+# =============================================================================
+# Precomputed Data Structures (for decoupled angle updates)
+# =============================================================================
+
+@dataclass
+class PrecomputedRegionData:
+    """Angle-independent precomputed data for a single board region."""
+    region: object  # Region object (has fold_recipe)
+    subdivided_verts: list  # Subdivided 2D outline vertices
+    region_holes_2d: list  # Subdivided 2D hole vertices per hole
+    triangles: list  # Triangle indices from triangulation
+    merged_2d: list  # Merged 2D vertices (from triangulate_with_holes), or None
+    has_holes: bool
+    color: tuple  # (r, g, b)
+
+
+@dataclass
+class PrecomputedBoardData:
+    """Angle-independent precomputed data for the board mesh."""
+    region_data: list  # list of PrecomputedRegionData
+    thickness: float
+    debug_regions: bool = False
+
+
+@dataclass
+class PrecomputedTraceData:
+    """Angle-independent precomputed data for a single trace mesh."""
+    t_values: list  # Parametric t-values along trace length
+    v0: tuple  # Ribbon corner 0
+    v1: tuple  # Ribbon corner 1
+    v2: tuple  # Ribbon corner 2
+    v3: tuple  # Ribbon corner 3
+    is_back_layer: bool
+    # Per-t-value data: list of (p1_2d, p2_2d, region_recipe_1, region_recipe_2)
+    point_data: list
+
+
+@dataclass
+class PrecomputedLayerData:
+    """Angle-independent precomputed data for all mesh layers."""
+    board: PrecomputedBoardData = None
+    traces: list = None  # list of PrecomputedTraceData
+    regions: list = None  # The Region objects (needed for recipe lookup)
+    markers: list = None  # FoldMarker objects (snapshot at precompute time)
+    num_bend_subdivisions: int = 1
+    board_thickness: float = 0.0
+
+
 def snap_to_plane(vertices: list[tuple[float, float, float]],
                   normals: list[tuple[float, float, float]]) -> list[tuple[float, float, float]]:
     """

@@ -76,7 +76,8 @@ try:
     from .mesh import (Mesh, create_board_geometry_mesh, create_board_layer_meshes,
                         compute_regions, build_board_layer, build_traces_layer,
                         build_pads_layer, build_components_layer, build_3d_models_layer,
-                        build_stiffeners_layer)
+                        build_stiffeners_layer,
+                        precompute_all_layers, retransform_all_layers)
     from .bend_transform import FoldDefinition, create_fold_definitions
     from .geometry import BoardGeometry, extract_geometry
     from .markers import FoldMarker, detect_fold_markers
@@ -88,7 +89,8 @@ except ImportError:
     from mesh import (Mesh, create_board_geometry_mesh, create_board_layer_meshes,
                        compute_regions, build_board_layer, build_traces_layer,
                        build_pads_layer, build_components_layer, build_3d_models_layer,
-                       build_stiffeners_layer)
+                       build_stiffeners_layer,
+                       precompute_all_layers, retransform_all_layers)
     from bend_transform import FoldDefinition, create_fold_definitions
     from geometry import BoardGeometry, extract_geometry
     from markers import FoldMarker, detect_fold_markers
@@ -609,6 +611,9 @@ class FlexViewerFrame(wx.Frame):
         self.folds = create_fold_definitions(self.fold_markers)
         self.fold_sliders = []
 
+        # Precomputed mesh data for fast angle-only updates
+        self._precomputed = None
+
         # Config and PCB reference
         self.pcb = pcb
         self.pcb_filepath = pcb_filepath
@@ -920,9 +925,15 @@ class FlexViewerFrame(wx.Frame):
         All heavy work runs in a single background thread.  The thread
         computes regions, then builds each layer and delivers it to the
         canvas via wx.CallAfter so the GUI never blocks.
+
+        Also precomputes angle-independent data so that subsequent
+        on_fold_angle_changed calls can use the fast retransform path.
         """
         if self.board_geometry is None:
             return
+
+        # Invalidate precomputed cache — full rebuild means topology may have changed
+        self._precomputed = None
 
         # Update fold definitions and markers with current slider values
         for i, slider in enumerate(self.fold_sliders):
@@ -964,11 +975,13 @@ class FlexViewerFrame(wx.Frame):
         # Clear canvas for new generation
         self.canvas.set_layer_meshes({}, visibility)
 
+        viewer_self = self  # capture for background thread
+
         def deliver(layer_name, mesh):
             """Post a layer to the canvas (called via wx.CallAfter)."""
-            if generation != self._mesh_generation:
+            if generation != viewer_self._mesh_generation:
                 return  # superseded by a newer rebuild
-            self.canvas.set_single_layer(layer_name, mesh, visibility.get(layer_name, False))
+            viewer_self.canvas.set_single_layer(layer_name, mesh, visibility.get(layer_name, False))
 
         def background_build():
             """Build all layers sequentially in a background thread."""
@@ -989,7 +1002,7 @@ class FlexViewerFrame(wx.Frame):
                     ('stiffeners', lambda: build_stiffeners_layer(board, regions, stiffeners, bend_enabled)),
                     ('3d_models', lambda: build_3d_models_layer(board, active_regions, pcb_dir, pcb)),
                 ]:
-                    if generation != self._mesh_generation:
+                    if generation != viewer_self._mesh_generation:
                         return  # new rebuild started, abandon this one
                     try:
                         layer_mesh = fn()
@@ -997,6 +1010,24 @@ class FlexViewerFrame(wx.Frame):
                         print(f"Warning: failed to build {name}: {e}")
                         layer_mesh = Mesh()
                     wx.CallAfter(deliver, name, layer_mesh)
+
+                # Precompute angle-independent data for fast retransform on
+                # subsequent slider changes.  Only cache if bending is enabled
+                # and this generation is still current.
+                if bend_enabled and generation == viewer_self._mesh_generation:
+                    try:
+                        precomputed = precompute_all_layers(
+                            board, markers, num_subs,
+                            subdivide_length=1.0,
+                            debug_regions=debug_reg,
+                        )
+                        # Store on main thread to avoid races
+                        def _cache_precomputed():
+                            if generation == viewer_self._mesh_generation:
+                                viewer_self._precomputed = precomputed
+                        wx.CallAfter(_cache_precomputed)
+                    except Exception as e:
+                        print(f"Warning: precompute failed (will use full rebuild): {e}")
             except Exception as e:
                 print(f"Warning: background mesh build failed: {e}")
 
@@ -1046,13 +1077,113 @@ class FlexViewerFrame(wx.Frame):
         return stiffeners
 
     def on_fold_angle_changed(self, fold_index: int, angle: float):
-        """Handle fold angle slider change."""
+        """Handle fold angle slider change.
+
+        Uses the fast retransform path when precomputed data is available,
+        skipping the expensive region splitting and triangulation.
+        """
         if fold_index < len(self.folds):
             self.folds[fold_index].angle = math.radians(angle)
         # Also update the fold marker (used by mesh generation)
         if fold_index < len(self.fold_markers):
             self.fold_markers[fold_index].angle_degrees = angle
-        self.update_mesh()
+
+        if self._precomputed is not None:
+            self._retransform_mesh()
+        else:
+            self.update_mesh()
+
+    def _retransform_mesh(self):
+        """Fast path: only retransform vertices using cached precomputed data.
+
+        Skips region splitting, subdivision, and triangulation — only performs
+        2D→3D vertex transformation with current fold angles.
+        """
+        if self.board_geometry is None or self._precomputed is None:
+            self.update_mesh()
+            return
+
+        # Update fold definitions and markers with current slider values
+        for i, slider in enumerate(self.fold_sliders):
+            angle_deg = slider.get_angle()
+            if i < len(self.folds):
+                self.folds[i].angle = math.radians(angle_deg)
+            if i < len(self.fold_markers):
+                self.fold_markers[i].angle_degrees = angle_deg
+
+        # Extract stiffeners
+        stiffeners = self._update_stiffener_status()
+
+        # Snapshot values for the background thread
+        bend_enabled = self.cb_bend.GetValue() if hasattr(self, 'cb_bend') else True
+        pcb_dir = os.path.dirname(self.pcb_filepath) if self.pcb_filepath else None
+        num_subs = self.config.bend_subdivisions if hasattr(self, 'config') else 1
+        debug_reg = self.cb_debug_regions.GetValue() if hasattr(self, 'cb_debug_regions') else False
+        board = self.board_geometry
+        markers = list(self.fold_markers)
+        pcb = self.pcb
+        precomputed = self._precomputed
+
+        show_3d = self.cb_3d_models.GetValue() if hasattr(self, 'cb_3d_models') else False
+        show_comp = self.cb_components.GetValue() if hasattr(self, 'cb_components') else False
+        visibility = {
+            'board': True,
+            'traces': self.cb_traces.GetValue() if hasattr(self, 'cb_traces') else False,
+            'pads': self.cb_pads.GetValue() if hasattr(self, 'cb_pads') else False,
+            'components': show_comp and not show_3d,
+            '3d_models': show_3d,
+            'stiffeners': self.cb_stiffeners.GetValue() if hasattr(self, 'cb_stiffeners') else True,
+        }
+
+        # If bend is disabled, fall back to full rebuild
+        if not bend_enabled:
+            self.update_mesh()
+            return
+
+        # Bump generation counter
+        if not hasattr(self, '_mesh_generation'):
+            self._mesh_generation = 0
+        self._mesh_generation += 1
+        generation = self._mesh_generation
+
+        viewer_self = self
+
+        def background_retransform():
+            try:
+                # Compute active_regions for pads/components/stiffeners rebuild
+                regions, active_regions = compute_regions(
+                    board, markers, num_subs, bend_enabled
+                )
+
+                meshes = retransform_all_layers(
+                    precomputed, board, active_regions, markers,
+                    num_bend_subdivisions=num_subs,
+                    apply_bend=bend_enabled,
+                    stiffeners=stiffeners,
+                    pcb_dir=pcb_dir,
+                    pcb=pcb,
+                    debug_regions=debug_reg,
+                    visibility=visibility,
+                )
+
+                for name, mesh in meshes.items():
+                    if generation != viewer_self._mesh_generation:
+                        return  # superseded by newer rebuild
+                    def _deliver(n=name, m=mesh):
+                        if generation != viewer_self._mesh_generation:
+                            return
+                        viewer_self.canvas.set_single_layer(
+                            n, m, visibility.get(n, False)
+                        )
+                    wx.CallAfter(_deliver)
+            except Exception as e:
+                print(f"Warning: retransform failed, falling back to full rebuild: {e}")
+                wx.CallAfter(viewer_self.update_mesh)
+
+        threading.Thread(target=background_retransform, daemon=True).start()
+
+        # Run validation
+        self.run_validation(stiffeners)
 
     def run_validation(self, stiffeners: list = None):
         """Run validation checks and update UI."""
