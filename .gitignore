@@ -37,7 +37,7 @@ test_*.py
 !tests/test_*.py
 
 # Config files (user-specific)
-*.flexviewer.json
+*.flex_config.json
 
 # Backup files
 *.bkp
@@ -45,3 +45,23 @@ test_*.py
 
 # Release packages
 *.zip
+
+# KiCad auto-generated
+*.kicad_prl
+*.kicad_pro
+fp-info-cache
+*-backups/
+*.lck
+.history/
+
+# Visual test outputs
+tests/visual/
+
+# Root symlink (dev convenience)
+/com_github_aightech_flexviz
+
+# Large test PCB (use neubondV4_simple instead)
+tests/test_data/neubondV4.kicad_pcb
+
+# Math doc generated figures
+docs/math/figures/
