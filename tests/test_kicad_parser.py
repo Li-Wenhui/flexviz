@@ -332,3 +332,80 @@ class TestOrderSegments:
             p2 = outline[(i + 1) % len(outline)]
             # Each edge should share a vertex
             assert p1 != p2
+
+
+class TestParserEdgeCases:
+    """Edge case tests for the S-expression parser."""
+
+    def test_empty_string_raises(self):
+        """Parsing empty string should raise ValueError."""
+        tokenizer = SExprTokenizer("")
+        with pytest.raises(ValueError):
+            parse_sexpr(tokenizer)
+
+    def test_single_atom_raises(self):
+        """Parsing a bare atom (no parens) should raise ValueError."""
+        tokenizer = SExprTokenizer("hello")
+        with pytest.raises(ValueError):
+            parse_sexpr(tokenizer)
+
+    def test_deeply_nested(self):
+        """50+ levels of nesting should parse without stack overflow."""
+        depth = 60
+        text = "(" * depth + "leaf" + ")" * depth
+        tokenizer = SExprTokenizer(text)
+        expr = parse_sexpr(tokenizer)
+        # Walk down the nesting
+        node = expr
+        for _ in range(depth - 2):
+            # Each level should have one child that is an SExpr
+            children = [c for c in node.children if isinstance(c, SExpr)]
+            if not children:
+                break
+            node = children[0]
+        # Should not have crashed
+        assert expr is not None
+
+    def test_unbalanced_open_paren_raises(self):
+        """Missing closing paren should raise ValueError."""
+        tokenizer = SExprTokenizer("(foo (bar)")
+        with pytest.raises(ValueError):
+            parse_sexpr(tokenizer)
+
+    def test_unbalanced_close_paren(self):
+        """Extra closing paren should not crash; parser stops after first complete expr."""
+        # "(foo) bar)" — parse_sexpr reads "(foo)" successfully; extra tokens remain
+        tokenizer = SExprTokenizer("(foo) bar)")
+        expr = parse_sexpr(tokenizer)
+        assert expr.name == "foo"
+
+    def test_string_with_quotes(self):
+        """Quoted strings should be preserved as single tokens."""
+        tokenizer = SExprTokenizer('(text "hello world")')
+        expr = parse_sexpr(tokenizer)
+        assert expr.name == "text"
+        assert expr.get_value(0) == "hello world"
+
+    def test_numeric_values_stored_as_strings(self):
+        """Numeric values are stored as strings in SExpr children."""
+        tokenizer = SExprTokenizer("(size 1.5 2.0)")
+        expr = parse_sexpr(tokenizer)
+        assert expr.name == "size"
+        assert expr.get_value(0) == "1.5"
+        assert expr.get_value(1) == "2.0"
+        # get_float should convert them
+        assert expr.get_float(0) == 1.5
+        assert expr.get_float(1) == 2.0
+
+    def test_kicad10_format_loads(self):
+        """h_shape.kicad_pcb (KiCad 9/10 format) should parse without error."""
+        h_shape_path = Path(__file__).parent / "test_data" / "h_shape.kicad_pcb"
+        if not h_shape_path.exists():
+            pytest.skip("h_shape.kicad_pcb test data not found")
+
+        pcb = KiCadPCB.load(h_shape_path)
+        assert pcb.root.name == "kicad_pcb"
+
+        # Should have gr_line entries (board outline and/or fold markers)
+        gr_lines = list(pcb.root.find_all("gr_line"))
+        assert len(gr_lines) > 0, "Expected gr_line entries in h_shape PCB"

@@ -707,3 +707,101 @@ class TestFlatSolidMixed:
             assert not undefined, f"Undefined entity references: {undefined}"
         finally:
             os.unlink(path)
+
+
+class TestStepWriterEdgeCases:
+    """Additional edge case tests for StepWriter."""
+
+    def test_point_deduplication(self):
+        """Same coordinates return the same entity ID."""
+        w = StepWriter()
+        id1 = w.cartesian_point((5.0, 10.0, 15.0))
+        id2 = w.cartesian_point((5.0, 10.0, 15.0))
+        assert id1 == id2
+
+    def test_direction_normalization(self):
+        """(0,0,2) and (0,0,1) normalize to the same direction entity."""
+        w = StepWriter()
+        id1 = w.direction((0.0, 0.0, 1.0))
+        id2 = w.direction((0.0, 0.0, 2.0))
+        assert id1 == id2
+
+    def test_opposite_directions_different(self):
+        """(0,0,1) and (0,0,-1) are different direction entities."""
+        w = StepWriter()
+        id1 = w.direction((0.0, 0.0, 1.0))
+        id2 = w.direction((0.0, 0.0, -1.0))
+        assert id1 != id2
+
+    def test_point_near_zero_rounding(self):
+        """Very small coords like (1e-12, 0, 0) round to (0,0,0) for dedup."""
+        w = StepWriter()
+        id1 = w.cartesian_point((0.0, 0.0, 0.0))
+        id2 = w.cartesian_point((1e-12, 0.0, 0.0))
+        # Both should round to (0,0,0) at 6 decimal places
+        assert id1 == id2
+
+    def test_entity_ids_monotonic(self):
+        """Each new unique entity gets a strictly incrementing ID."""
+        w = StepWriter()
+        id1 = w.cartesian_point((0.0, 0.0, 0.0))
+        id2 = w.cartesian_point((1.0, 0.0, 0.0))
+        id3 = w.cartesian_point((2.0, 0.0, 0.0))
+        assert id1 < id2 < id3
+
+    def test_write_creates_file(self):
+        """Write a simple solid; verify file exists and starts with ISO-10303-21."""
+        w = StepWriter()
+        outline = [
+            (0.0, 0.0, 0.0),
+            (10.0, 0.0, 0.0),
+            (10.0, 10.0, 0.0),
+            (0.0, 10.0, 0.0),
+        ]
+        brep_id = w.build_flat_solid(outline, None, (0.0, 0.0, 1.0), 1.6)
+        w.add_body(brep_id, "TEST_SOLID")
+
+        with tempfile.NamedTemporaryFile(suffix=".step", delete=False) as f:
+            path = f.name
+
+        try:
+            w.write(path)
+            assert os.path.exists(path)
+            content = open(path).read()
+            assert content.startswith("ISO-10303-21;")
+        finally:
+            os.unlink(path)
+
+    def test_empty_writer_writes_header(self):
+        """StepWriter with no entities still writes valid STEP header/footer."""
+        w = StepWriter()
+        with tempfile.NamedTemporaryFile(suffix=".step", delete=False) as f:
+            path = f.name
+
+        try:
+            w.write(path)
+            content = open(path).read()
+            assert content.startswith("ISO-10303-21;")
+            assert "HEADER;" in content
+            assert "ENDSEC;" in content
+            assert "DATA;" in content
+            assert "END-ISO-10303-21;" in content
+        finally:
+            os.unlink(path)
+
+    def test_manifold_solid_brep_box(self):
+        """Create a simple box using the API; verify reasonable entity count."""
+        w = StepWriter()
+        outline = [
+            (0.0, 0.0, 0.0),
+            (10.0, 0.0, 0.0),
+            (10.0, 10.0, 0.0),
+            (0.0, 10.0, 0.0),
+        ]
+        brep_id = w.build_flat_solid(outline, None, (0.0, 0.0, 1.0), 1.6)
+        assert brep_id > 0
+
+        entity_text = " ".join(text for _, text in w._entities)
+        assert "MANIFOLD_SOLID_BREP" in entity_text
+        # A box should have many entities (points, directions, edges, faces, etc.)
+        assert len(w._entities) > 20

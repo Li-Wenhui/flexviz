@@ -412,3 +412,100 @@ class TestSortMarkers:
         """Test sorting empty list."""
         result = sort_markers_by_position([])
         assert result == []
+
+
+class TestAngleParsingEdgeCases:
+    """Edge case tests for _parse_angle_from_text."""
+
+    def test_parse_zero_degrees(self):
+        """Parsing '0°' should return 0.0."""
+        val, label = _parse_angle_from_text("0°")
+        assert val == 0.0
+        assert label == ""
+
+    def test_parse_negative_angle(self):
+        """Parsing '-90°' should return -90.0."""
+        val, label = _parse_angle_from_text("-90°")
+        assert val == -90.0
+        assert label == ""
+
+    def test_parse_large_angle(self):
+        """Parsing '350°' should return 350.0."""
+        val, label = _parse_angle_from_text("350°")
+        assert val == 350.0
+        assert label == ""
+
+    def test_parse_angle_with_leading_trailing_spaces(self):
+        """Parsing ' 90° ' (with spaces) should still parse to 90.0."""
+        val, label = _parse_angle_from_text(" 90° ")
+        assert val == 90.0
+        assert label == ""
+
+    def test_parse_empty_string(self):
+        """Parsing '' should return (None, '')."""
+        val, label = _parse_angle_from_text("")
+        assert val is None
+        assert label == ""
+
+    def test_parse_non_numeric(self):
+        """Parsing 'auto' with no variables should return (None, '')."""
+        val, label = _parse_angle_from_text("auto")
+        assert val is None
+
+
+class TestFoldMarkerEdgeCases:
+    """Edge case tests for FoldMarker creation and properties."""
+
+    def test_zero_angle_gives_infinite_radius(self):
+        """FoldMarker with angle_degrees=0 should have infinite radius."""
+        line_a = GraphicLine(0, 0, 0, 10, "User.1")
+        line_b = GraphicLine(5, 0, 5, 10, "User.1")
+        marker = create_fold_marker(line_a, line_b, 0.0)
+        assert marker.radius == float('inf')
+
+    def test_negative_angle_positive_radius(self):
+        """FoldMarker with negative angle should still have positive radius."""
+        line_a = GraphicLine(0, 0, 0, 10, "User.1")
+        line_b = GraphicLine(5, 0, 5, 10, "User.1")
+        marker = create_fold_marker(line_a, line_b, -45.0)
+        assert marker.angle_degrees == -45.0
+        assert marker.radius > 0
+
+    def test_marker_axis_perpendicular_horizontal(self):
+        """Verify perpendicular = (-axis_y, axis_x) for horizontal fold lines."""
+        # Horizontal fold lines → axis is (1, 0), perp is (0, 1)
+        line_a = GraphicLine(0, 0, 30, 0, "User.1")
+        line_b = GraphicLine(0, 5, 30, 5, "User.1")
+        marker = create_fold_marker(line_a, line_b, 90.0)
+        perp = (-marker.axis[1], marker.axis[0])
+        # Perp should be roughly (0, 1) or (0, -1)
+        assert abs(abs(perp[1]) - 1.0) < 0.01
+        assert abs(perp[0]) < 0.01
+
+    def test_marker_center_is_midpoint_of_line_midpoints(self):
+        """Center should be the midpoint between the two line midpoints."""
+        line_a = GraphicLine(10, 0, 10, 20, "User.1")
+        line_b = GraphicLine(20, 0, 20, 20, "User.1")
+        marker = create_fold_marker(line_a, line_b, 90.0)
+        # mid_a = (10, 10), mid_b = (20, 10) → center = (15, 10)
+        assert marker.center[0] == pytest.approx(15.0, abs=0.01)
+        assert marker.center[1] == pytest.approx(10.0, abs=0.01)
+
+    def test_very_small_zone_width(self):
+        """Very small zone_width with 90-degree angle gives tiny radius."""
+        line_a = GraphicLine(0, 0, 0, 10, "User.1")
+        line_b = GraphicLine(0.001, 0, 0.001, 10, "User.1")
+        marker = create_fold_marker(line_a, line_b, 90.0)
+        assert marker.zone_width == pytest.approx(0.001, abs=1e-4)
+        expected_radius = 0.001 / math.radians(90.0)
+        assert marker.radius == pytest.approx(expected_radius, rel=0.1)
+
+    def test_marker_angle_radians_conversion(self):
+        """angle_radians property must match math.radians(angle_degrees)."""
+        line_a = GraphicLine(0, 0, 0, 10, "User.1")
+        line_b = GraphicLine(5, 0, 5, 10, "User.1")
+        for angle_deg in [30.0, 45.0, 60.0, 90.0, 120.0, -45.0, -90.0]:
+            marker = create_fold_marker(line_a, line_b, angle_deg)
+            assert marker.angle_radians == pytest.approx(
+                math.radians(angle_deg), abs=1e-10
+            )
