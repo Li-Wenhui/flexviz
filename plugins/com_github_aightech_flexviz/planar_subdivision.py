@@ -1441,7 +1441,8 @@ def detect_crossed_folds(
     region_to: Region,
     fold_markers: list,
     already_in_recipe_with_class: list,
-    fold_extents: dict = None
+    fold_extents: dict = None,
+    reach_cache: dict = None
 ) -> list[tuple[object, str]]:
     """
     Detect which folds are crossed when moving from region_from to region_to.
@@ -1490,12 +1491,13 @@ def detect_crossed_folds(
             if fold_extent is None:
                 continue
 
-            # Check if the fold affects the destination region:
-            # - fold_reaches_region: marker lines touch the region boundary
-            # - region_in_fold_column: region is in the fold's band of influence
-            # A region can be fully inside the fold zone without touching markers
-            if not fold_reaches_region(fold, region_to) and not region_in_fold_column(fold, region_to):
-                continue
+            # Check if the fold affects the destination region (cached for performance)
+            if reach_cache is not None:
+                if not reach_cache.get((id(fold), region_to.index), False):
+                    continue
+            else:
+                if not fold_reaches_region(fold, region_to) and not region_in_fold_column(fold, region_to):
+                    continue
 
         class_to = classify_point_vs_fold(point_to, fold)
 
@@ -1568,6 +1570,13 @@ def compute_fold_recipes(
             if extent is not None:
                 fold_extents[id(fold)] = extent
 
+    # Precompute fold-region reachability to avoid redundant O(n) checks during BFS
+    reach_cache = {}
+    for region in regions:
+        for fold in fold_markers:
+            key = (id(fold), region.index)
+            reach_cache[key] = fold_reaches_region(fold, region) or region_in_fold_column(fold, region)
+
     # Find anchor region
     anchor = find_anchor_region(regions, fold_markers)
     if anchor is None:
@@ -1591,7 +1600,8 @@ def compute_fold_recipes(
             # Detect newly crossed folds (using finite fold segments)
             # Pass full recipe with classifications for proper IN_ZONE → AFTER upgrade
             crossed = detect_crossed_folds(
-                current, neighbor, fold_markers, current.fold_recipe, fold_extents
+                current, neighbor, fold_markers, current.fold_recipe, fold_extents,
+                reach_cache=reach_cache
             )
 
             # Neighbor's recipe inherits ALL folds from current.
