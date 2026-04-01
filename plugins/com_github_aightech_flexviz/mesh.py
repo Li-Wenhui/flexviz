@@ -94,12 +94,12 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 try:
-    from .geometry import Polygon, BoardGeometry
+    from .geometry import Polygon, BoardGeometry, refine_outline_for_folds
     from .bend_transform import FoldDefinition
     from .markers import FoldMarker
     from .planar_subdivision import split_board_into_regions, Region
 except ImportError:
-    from geometry import Polygon, BoardGeometry
+    from geometry import Polygon, BoardGeometry, refine_outline_for_folds
     from bend_transform import FoldDefinition
     from markers import FoldMarker
     from planar_subdivision import split_board_into_regions, Region
@@ -149,10 +149,15 @@ def create_board_geometry_mesh(
     """
     mesh = Mesh()
 
+    # Refine arc segments that cross fold zones (adaptive subdivision)
+    refined_outline = board.outline
+    if markers and board.outline.segments:
+        refined_outline = refine_outline_for_folds(board.outline, markers)
+
     # Compute regions for region-based transformation
     regions = None
-    if markers and board.outline.vertices:
-        outline_verts = [(v[0], v[1]) for v in board.outline.vertices]
+    if markers and refined_outline.vertices:
+        outline_verts = [(v[0], v[1]) for v in refined_outline.vertices]
         cutout_verts = [[(v[0], v[1]) for v in c.vertices] for c in (board.cutouts or [])]
         regions = split_board_into_regions(
             outline_verts,
@@ -162,9 +167,9 @@ def create_board_geometry_mesh(
         )
 
     # Board outline with cutouts
-    if board.outline.vertices:
+    if refined_outline.vertices:
         board_mesh = create_board_mesh_with_regions(
-            board.outline,
+            refined_outline,
             board.thickness,
             markers=markers,
             subdivide_length=subdivide_length,
@@ -239,7 +244,11 @@ def compute_regions(board, markers, num_bend_subdivisions=1, apply_bend=True):
     """
     regions = None
     if markers and board.outline.vertices:
-        outline_verts = [(v[0], v[1]) for v in board.outline.vertices]
+        # Refine arc segments that cross fold zones
+        refined = board.outline
+        if board.outline.segments:
+            refined = refine_outline_for_folds(board.outline, markers)
+        outline_verts = [(v[0], v[1]) for v in refined.vertices]
         cutout_verts = [[(v[0], v[1]) for v in c.vertices] for c in (board.cutouts or [])]
         regions = split_board_into_regions(
             outline_verts,
@@ -391,11 +400,16 @@ def precompute_all_layers(board, markers, num_bend_subdivisions=1,
     Returns:
         PrecomputedLayerData
     """
+    # Refine arc segments that cross fold zones (adaptive subdivision)
+    refined_outline = board.outline
+    if markers and board.outline.segments:
+        refined_outline = refine_outline_for_folds(board.outline, markers)
+
     # Precompute board mesh data
     board_precomputed = None
-    if board.outline.vertices:
+    if refined_outline.vertices:
         board_precomputed = precompute_board_mesh(
-            board.outline,
+            refined_outline,
             board.thickness,
             markers=markers,
             subdivide_length=subdivide_length,
@@ -406,8 +420,8 @@ def precompute_all_layers(board, markers, num_bend_subdivisions=1,
 
     # Precompute regions for traces (needed for region lookups)
     regions = None
-    if markers and board.outline.vertices:
-        outline_verts = [(v[0], v[1]) for v in board.outline.vertices]
+    if markers and refined_outline.vertices:
+        outline_verts = [(v[0], v[1]) for v in refined_outline.vertices]
         cutout_verts = [[(v[0], v[1]) for v in c.vertices] for c in (board.cutouts or [])]
         regions = split_board_into_regions(
             outline_verts, cutout_verts, markers,

@@ -616,3 +616,226 @@ def circle_to_polygon(center_x: float, center_y: float, radius: float, segments:
         y = center_y + radius * math.sin(theta)
         vertices.append((x, y))
     return Polygon(vertices)
+
+
+# ============================================================================
+# Fillet bending — adaptive arc subdivision near fold zones
+# ============================================================================
+
+def arc_crosses_fold_zone(
+    arc_seg: OutlineSegment,
+    marker_center: tuple[float, float],
+    marker_axis: tuple[float, float],
+    marker_zone_width: float,
+) -> bool:
+    """
+    Check if an arc outline segment crosses or enters a fold zone.
+
+    The fold zone is a strip of width *marker_zone_width* centered on
+    *marker_center*, extending perpendicular to *marker_axis*.
+
+    We sample several points on the arc (start, mid, end, and two
+    quarter-points if center/radius are known) and check whether any of
+    them falls inside the fold zone (with 50 % margin).
+
+    Args:
+        arc_seg: An OutlineSegment of type "arc".
+        marker_center: (x, y) centre of the fold marker.
+        marker_axis: Unit vector along the fold line.
+        marker_zone_width: Distance between the two fold lines.
+
+    Returns:
+        True if the arc crosses or enters the fold zone.
+    """
+    hw = marker_zone_width / 2
+    perp = (-marker_axis[1], marker_axis[0])
+
+    # Collect sample points
+    sample_points = [arc_seg.start, arc_seg.end]
+    if arc_seg.mid is not None:
+        sample_points.append(arc_seg.mid)
+
+    # If centre/radius are known, add quarter-arc points for better coverage
+    if arc_seg.center is not None and arc_seg.radius > 0 and arc_seg.mid is not None:
+        cx, cy = arc_seg.center
+        r = arc_seg.radius
+
+        start_angle = math.atan2(arc_seg.start[1] - cy, arc_seg.start[0] - cx)
+        mid_angle = math.atan2(arc_seg.mid[1] - cy, arc_seg.mid[0] - cx)
+        end_angle = math.atan2(arc_seg.end[1] - cy, arc_seg.end[0] - cx)
+
+        def _norm(a):
+            while a < 0:
+                a += 2 * math.pi
+            while a >= 2 * math.pi:
+                a -= 2 * math.pi
+            return a
+
+        def _angle_between(a1, a2):
+            d = a2 - a1
+            while d < 0:
+                d += 2 * math.pi
+            while d >= 2 * math.pi:
+                d -= 2 * math.pi
+            return d
+
+        sa = _norm(start_angle)
+        ma = _norm(mid_angle)
+        ea = _norm(end_angle)
+
+        ccw_to_mid = _angle_between(sa, ma)
+        ccw_to_end = _angle_between(sa, ea)
+
+        if ccw_to_mid < ccw_to_end:
+            sweep = ccw_to_end
+            direction = 1
+        else:
+            sweep = 2 * math.pi - ccw_to_end
+            direction = -1
+
+        for frac in (0.25, 0.75):
+            angle = sa + direction * sweep * frac
+            sample_points.append((cx + r * math.cos(angle), cy + r * math.sin(angle)))
+
+    # Check each sample point against the fold zone
+    for pt in sample_points:
+        if pt is None:
+            continue
+        dx = pt[0] - marker_center[0]
+        dy = pt[1] - marker_center[1]
+        perp_dist = abs(dx * perp[0] + dy * perp[1])
+        if perp_dist <= hw * 1.5:  # 50 % margin
+            return True
+
+    return False
+
+
+def _refine_arc_segment(
+    seg: OutlineSegment,
+    max_seg_length: float = 0.25,
+) -> list[tuple[float, float]]:
+    """
+    Re-linearize an arc OutlineSegment at a finer resolution.
+
+    Returns a list of (x, y) points along the arc from *seg.start* to
+    *seg.end* (inclusive).  If the arc geometry is degenerate, falls back
+    to [start, end].
+
+    Args:
+        seg: An OutlineSegment with type "arc", center, radius, and mid set.
+        max_seg_length: Maximum chord length between consecutive points.
+
+    Returns:
+        List of (x, y) tuples along the arc.
+    """
+    if seg.center is None or seg.radius <= 0 or seg.mid is None:
+        return [seg.start, seg.end]
+
+    cx, cy = seg.center
+    r = seg.radius
+
+    # Compute angles
+    start_angle = math.atan2(seg.start[1] - cy, seg.start[0] - cx)
+    mid_angle = math.atan2(seg.mid[1] - cy, seg.mid[0] - cx)
+    end_angle = math.atan2(seg.end[1] - cy, seg.end[0] - cx)
+
+    def _norm(a):
+        while a < 0:
+            a += 2 * math.pi
+        while a >= 2 * math.pi:
+            a -= 2 * math.pi
+        return a
+
+    def _angle_between(a1, a2):
+        d = a2 - a1
+        while d < 0:
+            d += 2 * math.pi
+        while d >= 2 * math.pi:
+            d -= 2 * math.pi
+        return d
+
+    sa = _norm(start_angle)
+    ma = _norm(mid_angle)
+    ea = _norm(end_angle)
+
+    ccw_to_mid = _angle_between(sa, ma)
+    ccw_to_end = _angle_between(sa, ea)
+
+    if ccw_to_mid < ccw_to_end:
+        sweep = ccw_to_end
+        direction = 1
+    else:
+        sweep = 2 * math.pi - ccw_to_end
+        direction = -1
+
+    arc_length = r * sweep
+    n_segments = max(4, int(math.ceil(arc_length / max_seg_length)))
+
+    points = []
+    for i in range(n_segments + 1):
+        t = i / n_segments
+        angle = sa + direction * sweep * t
+        points.append((cx + r * math.cos(angle), cy + r * math.sin(angle)))
+
+    return points
+
+
+def refine_outline_for_folds(
+    outline: Polygon,
+    fold_markers: list,
+    fine_max_seg_length: float = 0.25,
+) -> Polygon:
+    """
+    Re-linearize arc segments that cross fold zones with finer subdivision.
+
+    For each arc segment in *outline.segments* that crosses any fold zone,
+    the arc is re-sampled with a much smaller chord length (default 0.25 mm
+    instead of the standard ~2 mm).  Line segments and arcs that do not
+    cross any fold zone are left unchanged.
+
+    The *segments* list on the returned Polygon is preserved (same
+    OutlineSegment objects) so that callers can call this function again
+    if markers change.
+
+    Args:
+        outline: Board outline Polygon with .segments populated.
+        fold_markers: List of FoldMarker objects (need .center, .axis,
+            .zone_width attributes).
+        fine_max_seg_length: Chord length for refined arcs (mm).
+
+    Returns:
+        A new Polygon with additional vertices where arcs cross fold zones.
+        If no arcs cross any fold zone the original Polygon is returned
+        unchanged.
+    """
+    if not fold_markers or not outline.segments:
+        return outline
+
+    fold_zones = [
+        (m.center, m.axis, m.zone_width) for m in fold_markers
+    ]
+
+    new_vertices = []
+    changed = False
+
+    for seg in outline.segments:
+        if seg.type == "arc" and seg.center is not None and seg.mid is not None:
+            crosses = any(
+                arc_crosses_fold_zone(seg, fz[0], fz[1], fz[2])
+                for fz in fold_zones
+            )
+            if crosses:
+                arc_pts = _refine_arc_segment(seg, max_seg_length=fine_max_seg_length)
+                # Add all points except the last (will be the start of the next segment)
+                new_vertices.extend(arc_pts[:-1])
+                changed = True
+                continue
+
+        # For line segments or arcs that don't cross fold zones,
+        # just add the start vertex (end is the start of the next segment).
+        new_vertices.append(seg.start)
+
+    if not changed:
+        return outline
+
+    return Polygon(new_vertices, outline.segments)

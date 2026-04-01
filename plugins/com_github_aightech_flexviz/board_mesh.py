@@ -8,7 +8,7 @@ cutout handling, and bend transformations.
 import math
 
 try:
-    from .geometry import Polygon, BoardGeometry, subdivide_polygon
+    from .geometry import Polygon, BoardGeometry, subdivide_polygon, refine_outline_for_folds
     from .bend_transform import FoldDefinition, FoldRecipe, transform_point, transform_point_and_normal, recipe_from_region
     from .markers import FoldMarker
     from .planar_subdivision import split_board_into_regions, Region, find_containing_region
@@ -19,7 +19,7 @@ try:
         PrecomputedBoardData, PrecomputedRegionData,
     )
 except ImportError:
-    from geometry import Polygon, BoardGeometry, subdivide_polygon
+    from geometry import Polygon, BoardGeometry, subdivide_polygon, refine_outline_for_folds
     from bend_transform import FoldDefinition, FoldRecipe, transform_point, transform_point_and_normal, recipe_from_region
     from markers import FoldMarker
     from planar_subdivision import split_board_into_regions, Region, find_containing_region
@@ -58,6 +58,10 @@ def precompute_board_mesh(
     """
     if not outline.vertices:
         return PrecomputedBoardData(region_data=[], thickness=thickness, debug_regions=debug_regions)
+
+    # Refine arc segments that cross fold zones (adaptive subdivision)
+    if markers and outline.segments:
+        outline = refine_outline_for_folds(outline, markers)
 
     cutouts = cutouts or []
 
