@@ -18,6 +18,11 @@ from dataclasses import dataclass
 import math
 from typing import Optional
 
+try:
+    from .polygon_ops import signed_area, ensure_ccw, ensure_cw, point_in_polygon, points_equal
+except ImportError:
+    from polygon_ops import signed_area, ensure_ccw, ensure_cw, point_in_polygon, points_equal
+
 
 # Type aliases
 Point = tuple[float, float]
@@ -29,70 +34,6 @@ CuttingLine = tuple[LineEquation, Point, Point]  # (line_eq, p1, p2)
 # =============================================================================
 # Basic Geometry Functions
 # =============================================================================
-
-def signed_area(polygon: Polygon) -> float:
-    """
-    Calculate signed area of polygon using shoelace formula.
-
-    Returns:
-        Positive for CCW winding, negative for CW winding.
-    """
-    n = len(polygon)
-    if n < 3:
-        return 0.0
-    area = 0.0
-    for i in range(n):
-        j = (i + 1) % n
-        area += polygon[i][0] * polygon[j][1]
-        area -= polygon[j][0] * polygon[i][1]
-    return area / 2.0
-
-
-def ensure_ccw(polygon: Polygon) -> Polygon:
-    """Ensure polygon has counter-clockwise winding order."""
-    if signed_area(polygon) < 0:
-        return list(reversed(polygon))
-    return list(polygon)
-
-
-def ensure_cw(polygon: Polygon) -> Polygon:
-    """Ensure polygon has clockwise winding order."""
-    if signed_area(polygon) > 0:
-        return list(reversed(polygon))
-    return list(polygon)
-
-
-def point_in_polygon(point: Point, polygon: Polygon) -> bool:
-    """
-    Check if point is inside polygon using ray casting algorithm.
-
-    Args:
-        point: (x, y) coordinates
-        polygon: List of (x, y) vertices
-
-    Returns:
-        True if point is inside polygon.
-    """
-    x, y = point
-    n = len(polygon)
-    inside = False
-
-    j = n - 1
-    for i in range(n):
-        xi, yi = polygon[i]
-        xj, yj = polygon[j]
-
-        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
-            inside = not inside
-        j = i
-
-    return inside
-
-
-def points_equal(p1: Point, p2: Point, eps: float = 1e-9) -> bool:
-    """Check if two points are equal within epsilon tolerance."""
-    return abs(p1[0] - p2[0]) < eps and abs(p1[1] - p2[1]) < eps
-
 
 def signed_distance_to_line(point: Point, line: LineEquation) -> float:
     """

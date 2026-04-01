@@ -14,6 +14,7 @@ try:
     from .bend_transform import (
         FoldDefinition, transform_point, compute_normal,
         _rotation_matrix_around_axis, _apply_rotation, _multiply_matrices,
+        recipe_from_region,
     )
     from .planar_subdivision import split_board_into_regions, find_containing_region
     from .stiffener import extract_stiffeners
@@ -22,6 +23,7 @@ except ImportError:
     from bend_transform import (
         FoldDefinition, transform_point, compute_normal,
         _rotation_matrix_around_axis, _apply_rotation, _multiply_matrices,
+        recipe_from_region,
     )
     from planar_subdivision import split_board_into_regions, find_containing_region
     from stiffener import extract_stiffeners
@@ -275,15 +277,11 @@ def _marker_to_fold_def(marker):
 
 
 def _recipe_with_fold_defs(recipe):
-    """Convert a region fold_recipe (with FoldMarker objects) to use FoldDefinitions."""
-    result = []
-    for entry in recipe:
-        marker = entry[0]
-        classification = entry[1]
-        entered_from_back = entry[2] if len(entry) > 2 else False
-        fold_def = _marker_to_fold_def(marker)
-        result.append((fold_def, classification, entered_from_back))
-    return result
+    """Convert a region fold_recipe to use FoldDefinitions. Delegates to bend_transform.recipe_from_region."""
+    # Create a minimal object with fold_recipe attribute for the canonical function
+    class _Holder:
+        fold_recipe = recipe
+    return recipe_from_region(_Holder())
 
 
 def _transform_polygon_3d(polygon_2d, recipe):

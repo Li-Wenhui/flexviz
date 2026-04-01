@@ -417,6 +417,30 @@ def create_fold_definitions(markers: list) -> list[FoldDefinition]:
     return [FoldDefinition.from_marker(m) for m in markers]
 
 
+def recipe_from_region(region) -> FoldRecipe:
+    """
+    Convert a Region's fold_recipe (FoldMarker-based) to FoldRecipe (FoldDefinition-based).
+
+    This is the single canonical conversion used by both mesh generation and STEP export.
+
+    Args:
+        region: Region object with fold_recipe attribute containing
+                [(FoldMarker, classification, entered_from_back), ...] tuples
+
+    Returns:
+        FoldRecipe: [(FoldDefinition, classification, entered_from_back), ...]
+    """
+    if not hasattr(region, 'fold_recipe') or not region.fold_recipe:
+        return []
+    result = []
+    for entry in region.fold_recipe:
+        marker = entry[0]
+        classification = entry[1]
+        entered_from_back = entry[2] if len(entry) > 2 else False
+        result.append((FoldDefinition.from_marker(marker), classification, entered_from_back))
+    return result
+
+
 # =============================================================================
 # Matrix Helpers
 # =============================================================================

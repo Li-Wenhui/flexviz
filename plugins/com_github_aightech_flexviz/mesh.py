@@ -13,108 +13,28 @@ try:
         ComponentGeometry, subdivide_polygon, line_segment_to_ribbon,
         pad_to_polygon, component_to_box
     )
-    from .bend_transform import FoldDefinition, FoldRecipe, transform_point, transform_point_and_normal
+    from .bend_transform import FoldDefinition, FoldRecipe, transform_point, transform_point_and_normal, recipe_from_region
     from .markers import FoldMarker
     from .planar_subdivision import split_board_into_regions, Region, find_containing_region
     from .model_loader import load_model, expand_kicad_vars, get_loader_status
+    from .polygon_ops import (
+        signed_area, ensure_ccw, ensure_cw, cross_product_2d,
+        is_convex_vertex, is_reflex_vertex_pts, point_in_triangle, point_in_polygon
+    )
 except ImportError:
     from geometry import (
         Polygon, LineSegment, BoardGeometry, PadGeometry,
         ComponentGeometry, subdivide_polygon, line_segment_to_ribbon,
         pad_to_polygon, component_to_box
     )
-    from bend_transform import FoldDefinition, FoldRecipe, transform_point, transform_point_and_normal
+    from bend_transform import FoldDefinition, FoldRecipe, transform_point, transform_point_and_normal, recipe_from_region
     from markers import FoldMarker
     from planar_subdivision import split_board_into_regions, Region, find_containing_region
     from model_loader import load_model, expand_kicad_vars, get_loader_status
-
-
-# =============================================================================
-# Triangulation - Ear Clipping Algorithm
-# Based on "Triangulation by Ear Clipping" by David Eberly
-# =============================================================================
-
-def signed_area(polygon: list[tuple[float, float]]) -> float:
-    """
-    Calculate signed area of polygon.
-    Positive = CCW, Negative = CW (in standard Y-up coordinates)
-    """
-    n = len(polygon)
-    area = 0.0
-    for i in range(n):
-        j = (i + 1) % n
-        area += polygon[i][0] * polygon[j][1]
-        area -= polygon[j][0] * polygon[i][1]
-    return area / 2.0
-
-
-def ensure_ccw(polygon: list[tuple[float, float]]) -> list[tuple[float, float]]:
-    """Ensure polygon is counter-clockwise ordered."""
-    if signed_area(polygon) < 0:
-        return list(reversed(polygon))
-    return list(polygon)
-
-
-def ensure_cw(polygon: list[tuple[float, float]]) -> list[tuple[float, float]]:
-    """Ensure polygon is clockwise ordered."""
-    if signed_area(polygon) > 0:
-        return list(reversed(polygon))
-    return list(polygon)
-
-
-def cross_product_2d(o: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> float:
-    """
-    Cross product of vectors OA and OB.
-    Positive = B is to the left of OA (CCW turn)
-    Negative = B is to the right of OA (CW turn)
-    """
-    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
-
-
-def is_convex_vertex(prev_v: tuple[float, float], curr_v: tuple[float, float], next_v: tuple[float, float]) -> bool:
-    """
-    Check if curr_v is a convex vertex (interior angle < 180 degrees).
-    For CCW polygon, convex means cross product > 0.
-    """
-    return cross_product_2d(prev_v, curr_v, next_v) > 0
-
-
-def is_reflex_vertex_pts(prev_v: tuple[float, float], curr_v: tuple[float, float], next_v: tuple[float, float]) -> bool:
-    """
-    Check if curr_v is a reflex vertex (interior angle > 180 degrees).
-    For CCW polygon, reflex means cross product < 0.
-    """
-    return cross_product_2d(prev_v, curr_v, next_v) < 0
-
-
-def point_in_triangle(p: tuple[float, float],
-                      a: tuple[float, float],
-                      b: tuple[float, float],
-                      c: tuple[float, float]) -> bool:
-    """Check if point p is inside triangle abc."""
-    d1 = cross_product_2d(a, b, p)
-    d2 = cross_product_2d(b, c, p)
-    d3 = cross_product_2d(c, a, p)
-
-    has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
-    has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
-
-    return not (has_neg and has_pos)
-
-
-def point_in_polygon(point: tuple[float, float], polygon: list[tuple[float, float]]) -> bool:
-    """Check if point is inside polygon using ray casting."""
-    x, y = point
-    n = len(polygon)
-    inside = False
-    j = n - 1
-    for i in range(n):
-        xi, yi = polygon[i]
-        xj, yj = polygon[j]
-        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
-            inside = not inside
-        j = i
-    return inside
+    from polygon_ops import (
+        signed_area, ensure_ccw, ensure_cw, cross_product_2d,
+        is_convex_vertex, is_reflex_vertex_pts, point_in_triangle, point_in_polygon
+    )
 
 
 def find_mutually_visible_vertex(M: tuple[float, float],
@@ -595,25 +515,8 @@ DEBUG_REGION_COLORS = [
 # Helper Functions for Transformation
 # =============================================================================
 
-def get_region_recipe(region: Region) -> FoldRecipe:
-    """
-    Get the fold recipe for a region.
-
-    Args:
-        region: Region object with fold_recipe attribute
-
-    Returns:
-        FoldRecipe (list of (FoldDefinition, classification, entered_from_back) tuples)
-    """
-    if not hasattr(region, 'fold_recipe') or not region.fold_recipe:
-        return []
-    result = []
-    for entry in region.fold_recipe:
-        fm = entry[0]
-        classification = entry[1]
-        entered_from_back = entry[2] if len(entry) > 2 else False
-        result.append((FoldDefinition.from_marker(fm), classification, entered_from_back))
-    return result
+# Backward-compatible alias — canonical implementation now in bend_transform.py
+get_region_recipe = recipe_from_region
 
 
 def transform_vertices_with_thickness(
