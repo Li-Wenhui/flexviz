@@ -21,6 +21,26 @@ except ImportError:
 
 import math
 
+try:
+    import numpy as np
+    _NUMPY_AVAILABLE = True
+except ImportError:
+    _NUMPY_AVAILABLE = False
+
+
+def _vbo_supported() -> bool:
+    """Return True if VBO functions are available at import time."""
+    if not OPENGL_AVAILABLE or not _NUMPY_AVAILABLE:
+        return False
+    try:
+        from OpenGL.GL import glGenBuffers  # noqa: F811
+        return callable(glGenBuffers)
+    except (ImportError, AttributeError):
+        return False
+
+
+_VBO_SUPPORTED = _vbo_supported()
+
 
 def get_opengl_install_instructions():
     """Get platform-specific instructions for installing PyOpenGL."""
@@ -131,13 +151,17 @@ class GLCanvas(glcanvas.GLCanvas):
         self.last_mouse_pos = None
         self.mouse_mode = None  # 'rotate', 'pan', 'zoom'
 
-        # Mesh layers: each has mesh, display_list, visible flag
+        # Mesh layers: each has mesh, display_list, vbo, visible flag
         self._layers = {}
         self._layer_order = ['board', 'traces', 'pads', 'components', '3d_models', 'stiffeners']
 
         # Legacy single-mesh support (for set_mesh compatibility)
         self.mesh = None
         self.display_list = None
+
+        # VBO support flag — set after first GL context initialisation
+        self._use_vbo = False
+        self._vbo_probed = False
 
         # Display options
         self.show_wireframe = False
@@ -183,11 +207,28 @@ class GLCanvas(glcanvas.GLCanvas):
         # Enable smooth shading
         glShadeModel(GL_SMOOTH)
 
+        # Probe VBO support (must happen with a current GL context)
+        if not self._vbo_probed:
+            self._vbo_probed = True
+            if _VBO_SUPPORTED:
+                try:
+                    test_buf = glGenBuffers(1)
+                    glDeleteBuffers(1, [test_buf])
+                    self._use_vbo = True
+                except Exception:
+                    self._use_vbo = False
+
         self.initialized = True
 
     def set_mesh(self, mesh: Mesh):
         """Set a single mesh to display (legacy interface)."""
         self.mesh = mesh
+
+        # Delete old layer resources
+        for layer in self._layers.values():
+            self._delete_vbo(layer.get('vbo'))
+            if layer.get('display_list') is not None:
+                glDeleteLists(layer['display_list'], 1)
         self._layers = {}
 
         # Delete old display list
@@ -214,8 +255,9 @@ class GLCanvas(glcanvas.GLCanvas):
             glDeleteLists(self.display_list, 1)
             self.display_list = None
 
-        # Delete old layer display lists
+        # Delete old layer rendering resources
         for layer in self._layers.values():
+            self._delete_vbo(layer.get('vbo'))
             if layer.get('display_list') is not None:
                 glDeleteLists(layer['display_list'], 1)
 
@@ -226,6 +268,7 @@ class GLCanvas(glcanvas.GLCanvas):
             self._layers[name] = {
                 'mesh': mesh,
                 'display_list': None,
+                'vbo': None,
                 'visible': visible,
             }
 
@@ -239,14 +282,17 @@ class GLCanvas(glcanvas.GLCanvas):
 
     def set_single_layer(self, name: str, mesh: Mesh, visible: bool = True):
         """Set or replace a single layer's mesh (called from background thread delivery)."""
-        # Delete old display list for this layer
+        # Delete old rendering resources for this layer
         old = self._layers.get(name)
-        if old and old.get('display_list') is not None:
-            glDeleteLists(old['display_list'], 1)
+        if old:
+            self._delete_vbo(old.get('vbo'))
+            if old.get('display_list') is not None:
+                glDeleteLists(old['display_list'], 1)
 
         self._layers[name] = {
             'mesh': mesh,
             'display_list': None,
+            'vbo': None,
             'visible': visible,
         }
 
@@ -349,17 +395,214 @@ class GLCanvas(glcanvas.GLCanvas):
         glEndList()
         return dl
 
+    # -----------------------------------------------------------------
+    # VBO compilation / rendering
+    # -----------------------------------------------------------------
+
+    def _compile_mesh_vbo(self, mesh: Mesh) -> dict:
+        """Compile mesh into VBO arrays for batched rendering.
+
+        Flattens all faces into triangles, expands per-face normals/colours
+        to per-vertex, and uploads to GPU buffers with GL_DYNAMIC_DRAW so
+        that vertex positions can later be updated cheaply via
+        ``_update_vbo_positions``.
+
+        Returns a dict with keys ``vbo_pos``, ``vbo_norm``, ``vbo_col``,
+        ``count`` (number of vertices to draw), and ``wireframe_vbo_pos``
+        (separate position VBO used by the wireframe overlay, or None).
+        """
+        # --- Build flat arrays ------------------------------------------------
+        positions = []
+        normals = []
+        colors = []
+
+        verts = mesh.vertices
+        n_verts = len(verts)
+
+        for i, face in enumerate(mesh.faces):
+            # Per-face normal
+            if i < len(mesh.normals):
+                nx, ny, nz = mesh.normals[i]
+            else:
+                nx, ny, nz = 0.0, 0.0, 1.0
+
+            # Per-face colour (0-255 -> 0.0-1.0)
+            if i < len(mesh.colors):
+                cr, cg, cb = mesh.colors[i]
+                cr, cg, cb = cr / 255.0, cg / 255.0, cb / 255.0
+            else:
+                cr, cg, cb = 0.2, 0.6, 0.2
+
+            # Fan-triangulate (handles tris, quads, and arbitrary polygons)
+            for j in range(1, len(face) - 1):
+                i0, i1, i2 = face[0], face[j], face[j + 1]
+                for vi in (i0, i1, i2):
+                    if vi < n_verts:
+                        vx, vy, vz = verts[vi]
+                    else:
+                        vx, vy, vz = 0.0, 0.0, 0.0
+                    positions.extend((vx, vy, vz))
+                    normals.extend((nx, ny, nz))
+                    colors.extend((cr, cg, cb))
+
+        count = len(positions) // 3
+        if count == 0:
+            return {'vbo_pos': None, 'vbo_norm': None, 'vbo_col': None,
+                    'count': 0, 'wireframe_vbo_pos': None}
+
+        pos_arr = np.array(positions, dtype=np.float32)
+        norm_arr = np.array(normals, dtype=np.float32)
+        col_arr = np.array(colors, dtype=np.float32)
+
+        # --- Upload to GPU ----------------------------------------------------
+        vbo_pos, vbo_norm, vbo_col = glGenBuffers(3)
+
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_pos)
+        glBufferData(GL_ARRAY_BUFFER, pos_arr.nbytes, pos_arr, GL_DYNAMIC_DRAW)
+
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_norm)
+        glBufferData(GL_ARRAY_BUFFER, norm_arr.nbytes, norm_arr, GL_STATIC_DRAW)
+
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_col)
+        glBufferData(GL_ARRAY_BUFFER, col_arr.nbytes, col_arr, GL_STATIC_DRAW)
+
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+        return {
+            'vbo_pos': vbo_pos,
+            'vbo_norm': vbo_norm,
+            'vbo_col': vbo_col,
+            'count': count,
+            'wireframe_vbo_pos': None,
+        }
+
+    def _render_layer_vbo(self, vbo_data: dict):
+        """Render a layer using VBO arrays.
+
+        Draws filled triangles and, when ``show_wireframe`` is active,
+        overlays edges in black using ``GL_LINE`` polygon mode.
+        """
+        if vbo_data is None or vbo_data.get('count', 0) == 0:
+            return
+
+        count = vbo_data['count']
+
+        # --- Filled pass ---
+        if self.show_faces:
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+
+            glEnableClientState(GL_VERTEX_ARRAY)
+            glEnableClientState(GL_NORMAL_ARRAY)
+            glEnableClientState(GL_COLOR_ARRAY)
+
+            glBindBuffer(GL_ARRAY_BUFFER, vbo_data['vbo_pos'])
+            glVertexPointer(3, GL_FLOAT, 0, None)
+
+            glBindBuffer(GL_ARRAY_BUFFER, vbo_data['vbo_norm'])
+            glNormalPointer(GL_FLOAT, 0, None)
+
+            glBindBuffer(GL_ARRAY_BUFFER, vbo_data['vbo_col'])
+            glColorPointer(3, GL_FLOAT, 0, None)
+
+            glDrawArrays(GL_TRIANGLES, 0, count)
+
+            glDisableClientState(GL_COLOR_ARRAY)
+            glDisableClientState(GL_NORMAL_ARRAY)
+            glDisableClientState(GL_VERTEX_ARRAY)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+        # --- Wireframe overlay ---
+        if self.show_wireframe:
+            glDisable(GL_LIGHTING)
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
+            glColor3f(0.0, 0.0, 0.0)
+            glLineWidth(1.0)
+
+            glEnableClientState(GL_VERTEX_ARRAY)
+            glBindBuffer(GL_ARRAY_BUFFER, vbo_data['vbo_pos'])
+            glVertexPointer(3, GL_FLOAT, 0, None)
+
+            glDrawArrays(GL_TRIANGLES, 0, count)
+
+            glDisableClientState(GL_VERTEX_ARRAY)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+            glEnable(GL_LIGHTING)
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+
+    def _update_vbo_positions(self, vbo_data: dict, mesh: Mesh):
+        """Update only vertex positions in an existing VBO (for slider changes).
+
+        Rebuilds the flat position array from *mesh.vertices* using the same
+        face traversal order as ``_compile_mesh_vbo`` so that normals and
+        colours remain correct, then uploads via ``glBufferSubData``.
+        """
+        if vbo_data is None or vbo_data.get('count', 0) == 0:
+            return
+
+        verts = mesh.vertices
+        n_verts = len(verts)
+        positions = []
+
+        for face in mesh.faces:
+            for j in range(1, len(face) - 1):
+                for vi in (face[0], face[j], face[j + 1]):
+                    if vi < n_verts:
+                        positions.extend(verts[vi])
+                    else:
+                        positions.extend((0.0, 0.0, 0.0))
+
+        pos_arr = np.array(positions, dtype=np.float32)
+
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_data['vbo_pos'])
+        glBufferSubData(GL_ARRAY_BUFFER, 0, pos_arr.nbytes, pos_arr)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+    def _delete_vbo(self, vbo_data: dict):
+        """Delete VBO buffers from the GPU."""
+        if vbo_data is None:
+            return
+        ids = []
+        for key in ('vbo_pos', 'vbo_norm', 'vbo_col', 'wireframe_vbo_pos'):
+            buf_id = vbo_data.get(key)
+            if buf_id is not None:
+                ids.append(buf_id)
+        if ids:
+            try:
+                glDeleteBuffers(len(ids), ids)
+            except Exception:
+                pass  # Context may already be destroyed
+
+    # -----------------------------------------------------------------
+    # Display-list helpers (fallback path)
+    # -----------------------------------------------------------------
+
     def build_display_list(self):
         """Build OpenGL display list for the legacy single mesh."""
         if self.mesh is None:
             return
-        self.display_list = self._compile_mesh_display_list(self.mesh)
+        if self._use_vbo:
+            # In VBO mode the legacy path is not used, but keep for compat.
+            self.display_list = self._compile_mesh_display_list(self.mesh)
+        else:
+            self.display_list = self._compile_mesh_display_list(self.mesh)
 
-    def _ensure_layer_display_lists(self):
-        """Build display lists for any layers that need them."""
+    def _ensure_layer_rendering(self):
+        """Build VBOs or display lists for any visible layers that need them."""
         for name, layer in self._layers.items():
-            if layer['visible'] and layer['display_list'] is None and layer['mesh'] and layer['mesh'].vertices:
-                layer['display_list'] = self._compile_mesh_display_list(layer['mesh'])
+            mesh = layer.get('mesh')
+            if not (layer['visible'] and mesh and mesh.vertices):
+                continue
+
+            if self._use_vbo:
+                if layer.get('vbo') is None:
+                    layer['vbo'] = self._compile_mesh_vbo(mesh)
+            else:
+                if layer.get('display_list') is None:
+                    layer['display_list'] = self._compile_mesh_display_list(mesh)
+
+    # Keep old name as alias for any external callers
+    _ensure_layer_display_lists = _ensure_layer_rendering
 
     def on_paint(self, event):
         """Handle paint event."""
@@ -369,11 +612,11 @@ class GLCanvas(glcanvas.GLCanvas):
         if not self.initialized:
             self.init_gl()
 
-        # Build display lists if needed
+        # Build rendering resources (VBO or display list) if needed
         if self.mesh is not None and self.display_list is None:
             self.build_display_list()
         if self._layers:
-            self._ensure_layer_display_lists()
+            self._ensure_layer_rendering()
 
         # Clear buffers
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
@@ -402,10 +645,16 @@ class GLCanvas(glcanvas.GLCanvas):
 
         # Draw layers (multi-layer mode)
         if self._layers:
-            for name in self._layer_order:
-                layer = self._layers.get(name)
-                if layer and layer['visible'] and layer['display_list'] is not None:
-                    glCallList(layer['display_list'])
+            if self._use_vbo:
+                for name in self._layer_order:
+                    layer = self._layers.get(name)
+                    if layer and layer['visible'] and layer.get('vbo') is not None:
+                        self._render_layer_vbo(layer['vbo'])
+            else:
+                for name in self._layer_order:
+                    layer = self._layers.get(name)
+                    if layer and layer['visible'] and layer.get('display_list') is not None:
+                        glCallList(layer['display_list'])
         # Legacy single mesh fallback
         elif self.display_list is not None:
             glCallList(self.display_list)
@@ -505,16 +754,36 @@ class GLCanvas(glcanvas.GLCanvas):
     def set_wireframe(self, show: bool):
         """Toggle wireframe display."""
         self.show_wireframe = show
-        if self.display_list is not None:
-            glDeleteLists(self.display_list, 1)
-            self.display_list = None
+
+        if self._use_vbo:
+            # VBO path: wireframe is handled at render time, no rebuild needed.
+            # But display-list layers (if any) need invalidation.
+            pass
+        else:
+            # Display list path: wireframe is baked in, must rebuild.
+            if self.display_list is not None:
+                glDeleteLists(self.display_list, 1)
+                self.display_list = None
+            # Invalidate layer display lists too
+            for layer in self._layers.values():
+                if layer.get('display_list') is not None:
+                    glDeleteLists(layer['display_list'], 1)
+                    layer['display_list'] = None
+
         self.Refresh()
 
     def refresh_mesh(self):
-        """Force mesh display list rebuild."""
+        """Force mesh rendering resources rebuild."""
         if self.display_list is not None:
             glDeleteLists(self.display_list, 1)
             self.display_list = None
+        # Invalidate all layer rendering resources
+        for layer in self._layers.values():
+            self._delete_vbo(layer.get('vbo'))
+            layer['vbo'] = None
+            if layer.get('display_list') is not None:
+                glDeleteLists(layer['display_list'], 1)
+                layer['display_list'] = None
         self.Refresh()
 
 
