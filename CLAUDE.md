@@ -50,9 +50,11 @@ flexviz/
 │   ├── mesh.py              # Triangle mesh generation
 │   ├── viewer.py            # wxPython + OpenGL viewer
 │   ├── step_export.py       # STEP CAD export
+│   ├── step_writer.py       # Pure Python STEP file writer
 │   └── resources/           # Icons
-├── tests/                   # Unit tests
+├── tests/                   # Unit tests (346 tests)
 ├── docs/                    # Documentation
+│   └── math/                # Mathematical docs with matplotlib plots
 └── install.sh               # Installation script
 ```
 
@@ -78,7 +80,7 @@ flexviz/
 
 7. **plugin.py**: KiCad `ActionPlugin` registration. Three actions: Test, Create Fold, Open Viewer.
 
-8. **step_export.py**: Exports bent geometry to STEP format using build123d/OpenCASCADE. Creates true CAD solids with named bodies (FLEX_PCB, STIFFENER_N).
+8. **step_export.py**: Exports bent geometry to STEP format. Uses `step_writer.py` (pure Python, no external dependencies) to create true B-Rep CAD solids with PLANE and CYLINDRICAL_SURFACE primitives.
 
 ### KiCad Plugin Entry Point
 
@@ -99,7 +101,7 @@ Fold markers on a User layer (configurable via viewer or config) consist of:
 - `bend_subdivisions`: Number of subdivisions in bend zones
 - `stiffener_layer_top/bottom`: Layers for stiffener regions
 - `stiffener_thickness`: Thickness of stiffeners in mm
-- Settings are saved per-PCB in `<pcb_name>.flexviewer.json`
+- Settings are saved per-PCB in `<pcb_name>.flex_config.json`
 
 ### Test Data
 
