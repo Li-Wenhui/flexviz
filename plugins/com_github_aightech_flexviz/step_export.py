@@ -349,6 +349,79 @@ def _transform_tagged_edges_3d(tagged_edges_2d, recipe, face_normal):
     return result
 
 
+def _sample_arc_2d(start, end, center, radius, ccw, n_samples=32):
+    """Sample a 2D arc at n_samples evenly-spaced points.
+
+    Returns list of (x, y) points from start to end, inclusive.
+    """
+    cx, cy = center
+    a_start = math.atan2(start[1] - cy, start[0] - cx)
+    a_end = math.atan2(end[1] - cy, end[0] - cx)
+
+    if ccw:
+        sweep = a_end - a_start
+        if sweep <= 0:
+            sweep += 2 * math.pi
+    else:
+        sweep = a_end - a_start
+        if sweep >= 0:
+            sweep -= 2 * math.pi
+
+    points = []
+    for i in range(n_samples):
+        t = i / (n_samples - 1) if n_samples > 1 else 0.0
+        angle = a_start + t * sweep
+        points.append((cx + radius * math.cos(angle),
+                        cy + radius * math.sin(angle)))
+    return points
+
+
+def _transform_tagged_edges_3d_bend(tagged_edges_2d, recipe, n_arc_samples=32):
+    """Transform 2D tagged edges to 3D edge dicts for bend zone regions.
+
+    For arcs, samples the arc in 2D and transforms each sample point
+    through the full fold recipe, producing a B-spline edge dict.
+    For lines, transforms start and end points normally.
+
+    Args:
+        tagged_edges_2d: list of TaggedEdge (2D)
+        recipe: fold recipe for 3D transformation
+        n_arc_samples: number of sample points for arc curves
+
+    Returns:
+        list of edge dicts suitable for StepWriter._make_mixed_loop
+        (types: "line" or "bspline")
+    """
+    result = []
+    for edge in tagged_edges_2d:
+        start_3d = transform_point(edge.start, recipe)
+        end_3d = transform_point(edge.end, recipe)
+
+        if edge.type == 'arc' and edge.center is not None:
+            # Sample the arc at many 2D points, then transform each to 3D
+            pts_2d = _sample_arc_2d(
+                edge.start, edge.end, edge.center, edge.radius,
+                edge.ccw, n_arc_samples
+            )
+            pts_3d = [transform_point(p, recipe) for p in pts_2d]
+            # Ensure start/end match the vertex-snapped positions
+            pts_3d[0] = start_3d
+            pts_3d[-1] = end_3d
+            result.append({
+                'type': 'bspline',
+                'start': start_3d,
+                'end': end_3d,
+                'sample_points': pts_3d,
+            })
+        else:
+            result.append({
+                'type': 'line',
+                'start': start_3d,
+                'end': end_3d,
+            })
+    return result
+
+
 def _compute_region_normal(region, recipe):
     """Compute the surface normal for a region."""
     if region.representative_point:
@@ -382,12 +455,16 @@ def _get_bend_info(recipe):
     return _marker_to_fold_def(marker), last_entry[1], entered_from_back
 
 
-def _build_bend_region_solid(writer, region, recipe_with_defs, thickness):
+def _build_bend_region_solid(writer, region, recipe_with_defs, thickness,
+                             original_segments=None):
     """
     Build a cylindrical solid for a bend zone region.
 
     For a bend region, the last recipe entry is IN_ZONE. We compute the
     cylinder geometry from the fold definition and region outline.
+
+    When original_segments are provided and arcs are found, arc edges in the
+    outline are exported as B-spline curves (sampled and transformed to 3D).
     """
     fold_def = None
     entered_from_back = False
@@ -522,6 +599,92 @@ def _build_bend_region_solid(writer, region, recipe_with_defs, thickness):
                  _scale(tangent, radius * math.sin(theta)))
         )
 
+    # Check for arcs in the bend region outline
+    tagged_edges = None
+    has_arcs = False
+    if original_segments:
+        tagged_edges = _recover_arcs(region.outline, original_segments)
+        has_arcs = any(e.type == 'arc' for e in tagged_edges)
+
+    if has_arcs and tagged_edges is not None:
+        # Mixed-edge path: arcs become B-splines through the fold recipe
+        inner_edges_3d = _transform_tagged_edges_3d_bend(
+            tagged_edges, recipe_with_defs, n_arc_samples=32
+        )
+
+        # Offset for outer (bottom) surface
+        # For the outer surface, we transform at a z-offset = -thickness
+        # In practice, we compute outer edges by offsetting inner edges
+        # along the radial direction (away from cyl_origin)
+        outer_edges_3d = []
+        for edge in inner_edges_3d:
+            oe = dict(edge)
+            if edge['type'] == 'bspline':
+                # Offset each sample point radially outward by thickness
+                out_pts = []
+                for pt in edge['sample_points']:
+                    # Project onto cylinder axis to find the axial component
+                    diff = _sub(pt, cyl_origin_3d)
+                    along_ax = _dot(diff, cyl_axis)
+                    axial_pt = _add(cyl_origin_3d, _scale(cyl_axis, along_ax))
+                    radial = _sub(pt, axial_pt)
+                    radial_len = math.sqrt(_dot(radial, radial))
+                    if radial_len > 1e-12:
+                        radial_dir = _normalize(radial)
+                        out_pts.append(_add(pt, _scale(radial_dir, thickness)))
+                    else:
+                        out_pts.append(pt)
+                oe['start'] = out_pts[0]
+                oe['end'] = out_pts[-1]
+                oe['sample_points'] = out_pts
+            else:
+                # Line edge: offset start and end radially
+                for key in ('start', 'end'):
+                    pt = edge[key]
+                    diff = _sub(pt, cyl_origin_3d)
+                    along_ax = _dot(diff, cyl_axis)
+                    axial_pt = _add(cyl_origin_3d, _scale(cyl_axis, along_ax))
+                    radial = _sub(pt, axial_pt)
+                    radial_len = math.sqrt(_dot(radial, radial))
+                    if radial_len > 1e-12:
+                        radial_dir = _normalize(radial)
+                        oe[key] = _add(pt, _scale(radial_dir, thickness))
+                    else:
+                        oe[key] = pt
+            outer_edges_3d.append(oe)
+
+        # Build inner face on cylindrical surface
+        inner_face = writer.add_cylindrical_face_mixed(
+            cyl_origin_3d, cyl_axis, cyl_ref, inner_radius,
+            inner_edges_3d, face_same_sense=False
+        )
+
+        # Build outer face (reversed winding) on outer cylindrical surface
+        outer_edges_reversed = []
+        for e in reversed(outer_edges_3d):
+            re_e = dict(e)
+            re_e['start'] = e['end']
+            re_e['end'] = e['start']
+            if e['type'] == 'bspline':
+                re_e['sample_points'] = list(reversed(e['sample_points']))
+            outer_edges_reversed.append(re_e)
+
+        outer_face = writer.add_cylindrical_face_mixed(
+            cyl_origin_3d, cyl_axis, cyl_ref, outer_radius,
+            outer_edges_reversed, face_same_sense=True
+        )
+
+        # Build side faces connecting inner and outer boundaries
+        side_face_ids = writer._build_side_faces_mixed(
+            inner_edges_3d, outer_edges_3d,
+            _normalize(up_3d)
+        )
+
+        all_faces = [inner_face, outer_face] + side_face_ids
+        shell_id = writer.closed_shell(all_faces)
+        return writer.manifold_solid_brep(shell_id)
+
+    # Default rectangular patch path (no arcs)
     # Inner surface (PCB top, at radius R from rotation center)
     inner_corners = [
         _cyl_point(along_min_cyl, theta_min, inner_radius),
@@ -617,7 +780,8 @@ def _build_flat_region_solid(writer, region, recipe_with_defs, thickness,
     return writer.build_flat_solid(outline_3d, holes_3d if holes_3d else None, normal, thickness)
 
 
-def _build_bend_region_faces(writer, region, recipe_with_defs, thickness):
+def _build_bend_region_faces(writer, region, recipe_with_defs, thickness,
+                             original_segments=None):
     """Like _build_bend_region_solid but returns face IDs (no shell/brep)."""
     fold_def = None
     entered_from_back = False
@@ -631,7 +795,8 @@ def _build_bend_region_faces(writer, region, recipe_with_defs, thickness):
     # Reuse the solid builder's full logic but call build_bend_faces
     # We duplicate the geometry computation from _build_bend_region_solid
     # to avoid maintaining two copies. Instead, delegate:
-    brep_id = _build_bend_region_solid(writer, region, recipe_with_defs, thickness)
+    brep_id = _build_bend_region_solid(writer, region, recipe_with_defs, thickness,
+                                       original_segments=original_segments)
     # Extract face IDs from the CLOSED_SHELL that wraps this brep
     # The brep entity is MANIFOLD_SOLID_BREP('',#shell), shell is brep_id-1
     shell_id = brep_id - 1
@@ -733,7 +898,10 @@ def board_to_step_native(board_geometry, markers, filename, config=None,
             recipe_defs = _recipe_with_fold_defs(region.fold_recipe)
 
             if _is_bend_region(region.fold_recipe):
-                face_ids = _build_bend_region_faces(writer, region, recipe_defs, thickness)
+                face_ids = _build_bend_region_faces(
+                    writer, region, recipe_defs, thickness,
+                    original_segments=original_segments,
+                )
             else:
                 face_ids = _build_flat_region_faces(
                     writer, region, recipe_defs, thickness,

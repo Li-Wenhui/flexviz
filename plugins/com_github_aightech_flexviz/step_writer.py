@@ -154,6 +154,28 @@ class StepWriter:
         ax_id = self.axis2_placement_3d(center, axis, ref_dir)
         return self._add(f"CIRCLE('',#{ax_id},{radius:.10g})")
 
+    def b_spline_curve(self, degree, control_point_ids, knot_multiplicities,
+                       knots, form=".UNSPECIFIED."):
+        """Create a B_SPLINE_CURVE_WITH_KNOTS entity.
+
+        Args:
+            degree: Polynomial degree (1 for polyline, 3 for cubic)
+            control_point_ids: List of CARTESIAN_POINT entity IDs
+            knot_multiplicities: Multiplicity of each knot
+            knots: Knot values
+            form: Curve form (.UNSPECIFIED., .POLYLINE_FORM., etc.)
+
+        Returns:
+            Entity ID of the B_SPLINE_CURVE_WITH_KNOTS
+        """
+        cp_refs = ",".join(f"#{cid}" for cid in control_point_ids)
+        mults = ",".join(str(m) for m in knot_multiplicities)
+        knot_vals = ",".join(f"{k:.10g}" for k in knots)
+        return self._add(
+            f"B_SPLINE_CURVE_WITH_KNOTS('',{degree},({cp_refs}),{form},"
+            f".F.,.F.,.F.,({mults}),({knot_vals}),.UNSPECIFIED.)"
+        )
+
     def plane(self, origin, normal, ref_dir=None):
         """PLANE surface."""
         if ref_dir is None:
@@ -323,11 +345,64 @@ class StepWriter:
         self._edge_cache[key] = (ec_id, v1, v2)
         return ec_id, True
 
+    def _get_or_create_bspline_edge(self, p1, p2, interior_points_3d):
+        """Get or create a B_SPLINE_CURVE_WITH_KNOTS EDGE_CURVE.
+
+        Creates a degree-1 (polyline) B-spline through the given 3D points.
+        The first point must equal p1 and the last must equal p2.
+
+        Args:
+            p1: start point (x, y, z)
+            p2: end point (x, y, z)
+            interior_points_3d: list of (x, y, z) points INCLUDING p1 and p2
+
+        Returns (edge_curve_id, same_direction) where same_direction is True
+        if the edge goes from p1 to p2.
+        """
+        v1 = self.vertex_point(p1)
+        v2 = self.vertex_point(p2)
+        key = frozenset((v1, v2))
+        if key in self._edge_cache:
+            ec_id, start_v, _ = self._edge_cache[key]
+            return ec_id, (start_v == v1)
+
+        # Create control points (all sample points)
+        cp_ids = [self.cartesian_point(pt) for pt in interior_points_3d]
+        n_pts = len(cp_ids)
+
+        # Degree 1 B-spline (polyline): knots are chord-length parameterized
+        # Knot multiplicities: 2 at each end, 1 in the middle
+        if n_pts < 2:
+            # Degenerate: fall back to line
+            return self._get_or_create_line_edge(p1, p2)
+
+        # Chord-length parameterization for knots
+        knots = [0.0]
+        for i in range(1, n_pts):
+            prev = interior_points_3d[i - 1]
+            curr = interior_points_3d[i]
+            d = math.sqrt(sum((a - b) ** 2 for a, b in zip(prev, curr)))
+            knots.append(knots[-1] + d)
+        # Normalize to [0, 1]
+        total = knots[-1]
+        if total > 1e-15:
+            knots = [k / total for k in knots]
+        else:
+            knots = [i / (n_pts - 1) for i in range(n_pts)]
+
+        knot_multiplicities = [2] + [1] * (n_pts - 2) + [2]
+
+        bsp_id = self.b_spline_curve(1, cp_ids, knot_multiplicities, knots,
+                                     ".POLYLINE_FORM.")
+        ec_id = self.edge_curve(v1, v2, bsp_id, True)
+        self._edge_cache[key] = (ec_id, v1, v2)
+        return ec_id, True
+
     def _make_mixed_loop(self, tagged_edges_3d):
         """Make an EDGE_LOOP from a list of edge dicts with type info.
 
         Each element is a dict with:
-            type: "line" or "arc"
+            type: "line", "arc", or "bspline"
             start: (x,y,z)
             end: (x,y,z)
         For arcs, also:
@@ -335,6 +410,8 @@ class StepWriter:
             axis: (x,y,z)
             ref_dir: (x,y,z)
             radius: float
+        For bsplines, also:
+            sample_points: list of (x,y,z) including start and end
         """
         oriented_edges = []
         for edge in tagged_edges_3d:
@@ -345,7 +422,11 @@ class StepWriter:
             if length < 1e-12:
                 continue
 
-            if edge['type'] == 'arc':
+            if edge['type'] == 'bspline':
+                ec_id, same_dir = self._get_or_create_bspline_edge(
+                    p1, p2, edge['sample_points']
+                )
+            elif edge['type'] == 'arc':
                 ec_id, same_dir = self._get_or_create_arc_edge(
                     p1, p2, edge['center'], edge['axis'], edge['ref_dir'], edge['radius'],
                     ccw=edge.get('ccw', True)
@@ -450,6 +531,28 @@ class StepWriter:
         loop_id = self.edge_loop([oe0, oe1, oe2, oe3])
         bound_id = self.face_outer_bound(loop_id, True)
 
+        return self.advanced_face([bound_id], surf_id, face_same_sense)
+
+    def add_cylindrical_face_mixed(self, cyl_origin, cyl_axis, cyl_ref, radius,
+                                   tagged_edges_3d, face_same_sense=True):
+        """Build an ADVANCED_FACE on a CYLINDRICAL_SURFACE using mixed edges.
+
+        The boundary can contain line, arc, and bspline edges.
+
+        Args:
+            cyl_origin: cylinder axis origin
+            cyl_axis: cylinder axis direction (unit)
+            cyl_ref: reference direction for cylinder (radial at angle=0)
+            radius: cylinder radius
+            tagged_edges_3d: list of edge dicts (see _make_mixed_loop)
+            face_same_sense: if True, face normal = surface outward normal
+
+        Returns:
+            face entity ID
+        """
+        surf_id = self.cylindrical_surface(cyl_origin, cyl_axis, cyl_ref, radius)
+        loop_id = self._make_mixed_loop(tagged_edges_3d)
+        bound_id = self.face_outer_bound(loop_id, True)
         return self.advanced_face([bound_id], surf_id, face_same_sense)
 
     # -----------------------------------------------------------------
@@ -578,7 +681,20 @@ class StepWriter:
             if math.sqrt(_dot(d, d)) < 1e-12:
                 continue
 
-            if top_e['type'] == 'arc':
+            if top_e['type'] == 'bspline':
+                # B-spline side face: tessellated as planar quads between
+                # consecutive sample points (ruled surface approximation)
+                top_pts = top_e['sample_points']
+                bot_pts = bot_e['sample_points']
+                for k in range(len(top_pts) - 1):
+                    quad = [top_pts[k], top_pts[k + 1],
+                            bot_pts[k + 1], bot_pts[k]]
+                    edge1 = _sub(quad[1], quad[0])
+                    edge2 = _sub(quad[3], quad[0])
+                    face_normal = _normalize(_cross(edge1, edge2))
+                    face_id = self.add_planar_face(quad, face_normal)
+                    face_ids.append(face_id)
+            elif top_e['type'] == 'arc':
                 # Cylindrical side face — manually built to reuse cached edges
                 n = _normalize(top_normal)
                 cyl_center = top_e['center']
