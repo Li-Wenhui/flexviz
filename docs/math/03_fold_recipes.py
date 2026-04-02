@@ -147,6 +147,10 @@ def draw_adjacency_graph():
     ox = [v[0] for v in outline] + [outline[0][0]]
     oy = [v[1] for v in outline] + [outline[0][1]]
     ax.plot(ox, oy, "k-", linewidth=0.3, alpha=0.3)
+    for hole in holes:
+        hx = [v[0] for v in hole] + [hole[0][0]]
+        hy = [v[1] for v in hole] + [hole[0][1]]
+        ax.plot(hx, hy, "k-", linewidth=0.3, alpha=0.3)
 
     ax.set_title("Region Adjacency Graph")
     ax.set_xlabel("x (mm)")
@@ -349,6 +353,10 @@ def draw_recipe_map():
     ox = [v[0] for v in outline] + [outline[0][0]]
     oy = [v[1] for v in outline] + [outline[0][1]]
     ax.plot(ox, oy, "k-", linewidth=1.2)
+    for hole in holes:
+        hx = [v[0] for v in hole] + [hole[0][0]]
+        hy = [v[1] for v in hole] + [hole[0][1]]
+        ax.plot(hx, hy, "k-", linewidth=1.2)
 
     # Draw fold marker lines
     for i, m in enumerate(markers):
@@ -451,6 +459,10 @@ def draw_back_entry():
     ox = [v[0] for v in outline] + [outline[0][0]]
     oy = [v[1] for v in outline] + [outline[0][1]]
     ax.plot(ox, oy, "k-", linewidth=1.0)
+    for hole in holes:
+        hx = [v[0] for v in hole] + [hole[0][0]]
+        hy = [v[1] for v in hole] + [hole[0][1]]
+        ax.plot(hx, hy, "k-", linewidth=1.0)
 
     # Legend
     legend_handles = [

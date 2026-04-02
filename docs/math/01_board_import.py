@@ -66,14 +66,37 @@ print(f"  Fold markers     : {len(markers)}")
 # ===================================================================
 def draw_board_outline(ax, *, fill_color="#e8f0e8", edge_color="#336633",
                        linewidth=1.5, alpha=0.6, label=None):
-    """Draw the board outline polygon on *ax*, filled and outlined."""
+    """Draw the board outline polygon on *ax*, filled with cutout holes."""
+    from matplotlib.path import Path as MplPath
+    from matplotlib.patches import PathPatch
+
     verts = geo.outline.vertices
     if not verts:
         return
-    xs = [v[0] for v in verts] + [verts[0][0]]
-    ys = [v[1] for v in verts] + [verts[0][1]]
-    ax.fill(xs, ys, color=fill_color, alpha=alpha, zorder=0, label=label)
-    ax.plot(xs, ys, color=edge_color, linewidth=linewidth, zorder=1)
+
+    # Build compound path: outer boundary + cutout holes
+    def ring_codes(n):
+        return [MplPath.MOVETO] + [MplPath.LINETO] * (n - 1) + [MplPath.CLOSEPOLY]
+
+    path_verts = list(verts) + [verts[0]]
+    path_codes = ring_codes(len(verts))
+
+    for cutout in geo.cutouts:
+        cverts = cutout.vertices
+        path_verts += list(cverts) + [cverts[0]]
+        path_codes += ring_codes(len(cverts))
+
+    path = MplPath(path_verts, path_codes)
+    patch = PathPatch(path, facecolor=fill_color, edgecolor=edge_color,
+                      linewidth=linewidth, alpha=alpha, zorder=0, label=label)
+    ax.add_patch(patch)
+
+    # Also draw cutout edges explicitly for visibility
+    for cutout in geo.cutouts:
+        cverts = cutout.vertices
+        cxs = [v[0] for v in cverts] + [cverts[0][0]]
+        cys = [v[1] for v in cverts] + [cverts[0][1]]
+        ax.plot(cxs, cys, color=edge_color, linewidth=linewidth, zorder=1)
 
 
 # ===================================================================
@@ -93,6 +116,13 @@ def fig_board_outline():
     # Plot vertex dots
     ax.scatter(xs, ys, s=18, color="#226622", zorder=3)
 
+    # Plot cutout vertex dots
+    for cutout in geo.cutouts:
+        cverts = cutout.vertices
+        cxs = [v[0] for v in cverts]
+        cys = [v[1] for v in cverts]
+        ax.scatter(cxs, cys, s=18, color="#993333", zorder=3)
+
     # Label a selection of vertices (corners of the H shape)
     # Pick every 4th vertex so labels stay readable
     step = max(1, len(verts) // 8)
@@ -110,7 +140,7 @@ def fig_board_outline():
             zorder=4,
         )
 
-    ax.set_title("H-Shape Board Outline", fontsize=14, fontweight="bold")
+    ax.set_title("H-Shape Board Outline (with cutouts)", fontsize=14, fontweight="bold")
     ax.set_xlabel("x  (mm)")
     ax.set_ylabel("y  (mm)")
     ax.set_aspect("equal")
@@ -122,8 +152,9 @@ def fig_board_outline():
     fig.savefig(out, dpi=DPI)
     plt.close(fig)
     print(f"\nFigure 1 saved: {out}")
-    print("  Shows the board outline polygon with vertex coordinates.")
+    print("  Shows the board outline polygon with vertex coordinates and cutout holes.")
     print(f"  {len(verts)} vertices define the H shape (including arc approximations).")
+    print(f"  {len(geo.cutouts)} cutout(s) shown with red vertex dots.")
 
 
 # ===================================================================
