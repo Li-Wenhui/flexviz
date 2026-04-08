@@ -53,11 +53,11 @@ class CreateFoldAction(pcbnew.ActionPlugin):
     """Action to create a new fold marker."""
 
     def defaults(self):
-        self.name = "Create Fold"
+        self.name = "创建折叠"
         self.category = "Flex PCB"
-        self.description = "Create a fold marker for flex PCB visualization"
+        self.description = "创建FlexPCb可视化折叠标记"
         self.show_toolbar_button = True
-        self.icon_file_name = os.path.join(PLUGIN_DIR, "resources", "markericon.drawio.svg")
+        self.icon_file_name = os.path.join(PLUGIN_DIR, "resources", "markericon.png")
 
     def Run(self):
         try:
@@ -76,11 +76,11 @@ class OpenViewerAction(pcbnew.ActionPlugin):
     """Action to open the 3D fold viewer."""
 
     def defaults(self):
-        self.name = "Open Fold Viewer"
+        self.name = "打开折叠视图"
         self.category = "Flex PCB"
-        self.description = "Open the 3D viewer to visualize the folded flex PCB"
+        self.description = "打开Flex PCB折叠3D查看视图"
         self.show_toolbar_button = True
-        self.icon_file_name = os.path.join(PLUGIN_DIR, "resources", "viewericon.drawio.svg")
+        self.icon_file_name = os.path.join(PLUGIN_DIR, "resources", "viewericon.png")
 
     def Run(self):
         global _viewer_frame
